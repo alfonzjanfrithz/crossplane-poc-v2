@@ -19,9 +19,16 @@ fi
 echo "==> 1/10  LocalStack (podman, kind network)"
 if ! podman ps --format '{{.Names}}' | grep -q '^localstack$'; then
   podman rm -f localstack >/dev/null 2>&1 || true
-  podman run -d --name localstack --network kind --ip 10.89.1.10 \
+  # No static --ip: let podman assign one from the kind network's subnet
+  # (the subnet differs per machine). We read the assigned IP back below and
+  # inject it into the manual Endpoints, so nothing is hardcoded.
+  podman run -d --name localstack --network kind \
     -p 4566:4566 docker.io/localstack/localstack:4.3 >/dev/null
 fi
+# Discover the IP podman gave LocalStack on the kind network (runs whether we
+# just started it or it was already up). This value flows into step 4.
+LS_IP=$(podman inspect localstack -f '{{(index .NetworkSettings.Networks "kind").IPAddress}}')
+echo "      LocalStack IP on kind network: $LS_IP"
 
 echo "==> 2/10  kind cluster"
 kind get clusters 2>/dev/null | grep -q '^crossplane-poc$' || \
@@ -41,7 +48,10 @@ helm upgrade --install external-secrets external-secrets/external-secrets \
   -n external-secrets --create-namespace --set installCRDs=true --wait >/dev/null
 
 echo "==> 4/10  LocalStack in-cluster Service (manual Endpoints)"
-kubectl apply --server-side -f "$ROOT/crossplane/localstack-service.yaml" >/dev/null
+# Inject the discovered LocalStack IP into the Endpoints placeholder at apply
+# time, so the in-cluster DNS name routes to wherever podman put the container.
+sed "s/__LOCALSTACK_IP__/$LS_IP/" "$ROOT/crossplane/localstack-service.yaml" \
+  | kubectl apply --server-side -f - >/dev/null
 
 echo "==> 5/10  Crossplane function"
 kubectl apply -f "$ROOT/crossplane/function-patch-and-transform.yaml" >/dev/null

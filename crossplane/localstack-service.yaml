@@ -12,7 +12,8 @@ spec:
   # No selector: manual Endpoints give pods a stable in-cluster DNS name
   # (localstack.localstack-system.svc.cluster.local) that routes to the
   # LocalStack container running outside k8s on the podman 'kind' bridge
-  # network at pinned IP 10.89.1.10.
+  # network. The address below is a placeholder (__LOCALSTACK_IP__) that
+  # up.sh substitutes with the IP podman actually assigned the container.
   type: ClusterIP
   ports:
     - name: edge
@@ -27,7 +28,7 @@ metadata:
   namespace: localstack-system
 subsets:
   - addresses:
-      - ip: 10.89.1.10
+      - ip: __LOCALSTACK_IP__
     ports:
       - name: edge
         port: 4566
