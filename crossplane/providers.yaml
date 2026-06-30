@@ -1,0 +1,20 @@
+apiVersion: pkg.crossplane.io/v1
+kind: Provider
+metadata:
+  name: provider-aws-s3
+spec:
+  # v2 per-service provider. Auto-resolves its provider-family-aws dependency.
+  # Registers the namespaced MRs under s3.aws.m.upbound.io.
+  package: xpkg.upbound.io/crossplane-contrib/provider-aws-s3:v2.0.0
+  runtimeConfigRef:
+    name: provider-aws-s3-runtime
+    kind: DeploymentRuntimeConfig
+---
+apiVersion: pkg.crossplane.io/v1
+kind: Provider
+metadata:
+  name: provider-terraform
+spec:
+  # Namespaced MRs under tf.m.upbound.io. Used for the Crossplane-native
+  # Vault sync (terraform hashicorp/vault provider inside a Workspace).
+  package: xpkg.upbound.io/crossplane-contrib/provider-terraform:v1.1.1

@@ -1,0 +1,50 @@
+{{- $ns := .Values.namespace -}}
+# Vault access for this namespace. SecretStore is namespace-scoped, so the
+# consumer needs its own token + SecretStore in demo-app-2 (it cannot reference
+# demo-app's store). It reads the value demo-app's PushSecret wrote to Vault.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vault-token
+  namespace: {{ $ns }}
+type: Opaque
+stringData:
+  token: root
+---
+apiVersion: external-secrets.io/v1
+kind: SecretStore
+metadata:
+  name: vault-backend
+  namespace: {{ $ns }}
+spec:
+  provider:
+    vault:
+      server: http://vault.rss.svc.cluster.local:8200
+      path: secret
+      version: v2
+      auth:
+        tokenSecretRef:
+          name: vault-token
+          key: token
+---
+# Pull direction (Vault -> Kubernetes Secret). This is the inverse of demo-app's
+# PushSecret (Kubernetes Secret -> Vault). Together they close the loop:
+# Crossplane -> Secret (demo-app) -> Vault -> Secret (demo-app-2) -> consumer.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: shared-bucket
+  namespace: {{ $ns }}
+spec:
+  refreshInterval: 10s
+  secretStoreRef:
+    name: vault-backend
+    kind: SecretStore
+  target:
+    name: shared-bucket
+    creationPolicy: Owner
+  data:
+    - secretKey: bucketName
+      remoteRef:
+        key: {{ .Values.vaultPath }}
+        property: bucketName

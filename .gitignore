@@ -1,0 +1,9 @@
+# Editor / OS cruft
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Local artifacts (not part of the PoC source)
+*.kubeconfig
+*.log

@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.name }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: demo-app
+    app.kubernetes.io/instance: {{ .Values.name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: demo-app
+      app.kubernetes.io/instance: {{ .Values.name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: demo-app
+        app.kubernetes.io/instance: {{ .Values.name }}
+    spec:
+      containers:
+        - name: app
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # Dynamic value from the Crossplane-composed Secret. The Secret is
+          # named "<name>-bucket" by the composition and lands in this namespace.
+          env:
+            - name: BUCKET_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.name }}-bucket
+                  key: bucketName
+            # LocalStack ignores credentials, but the AWS SDK requires *some*.
+            - name: AWS_ACCESS_KEY_ID
+              value: test
+            - name: AWS_SECRET_ACCESS_KEY
+              value: test
+            - name: AWS_REGION
+              value: us-east-1
+          volumeMounts:
+            - name: config
+              mountPath: /etc/config
+              readOnly: true
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              # Render the ConfigMap template, substituting the dynamic bucket
+              # name that came from Crossplane via the Secret.
+              sed "s|\${BUCKET_NAME}|${BUCKET_NAME}|g" /etc/config/config.json > /tmp/config.json
+              echo "=== rendered app config ==="
+              cat /tmp/config.json
+              echo "=== writing objects to s3://${BUCKET_NAME} ==="
+              while true; do
+                TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+                echo "${TS} hello from ${BUCKET_NAME}" > /tmp/msg.txt
+                if aws --endpoint-url=http://localstack.localstack-system.svc.cluster.local:4566 \
+                        --region us-east-1 \
+                        s3 cp /tmp/msg.txt "s3://${BUCKET_NAME}/msgs/msg-${TS}.txt" >/dev/null 2>&1; then
+                  echo "[${TS}] wrote s3://${BUCKET_NAME}/msgs/msg-${TS}.txt"
+                else
+                  echo "[${TS}] write FAILED"
+                fi
+                sleep {{ .Values.pollSeconds }}
+              done
+      volumes:
+        - name: config
+          configMap:
+            name: {{ .Values.name }}-config

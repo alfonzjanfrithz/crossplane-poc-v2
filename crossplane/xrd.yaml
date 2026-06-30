@@ -1,0 +1,30 @@
+apiVersion: apiextensions.crossplane.io/v2
+kind: CompositeResourceDefinition
+metadata:
+  name: xbuckets.platform.acme.io
+spec:
+  group: platform.acme.io
+  names:
+    kind: XBucket
+    plural: xbuckets
+  # v2: XRs are namespaced by default. No claimNames -- v2 drops the claim
+  # abstraction; applications create the XR directly in their own namespace.
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      referenceable: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                bucketPrefix:
+                  description: Prefix for the generated S3 bucket name. The
+                    composition appends the XR name plus a stable random suffix
+                    derived from the XR uid, so the final bucket name is dynamic.
+                  type: string
+                  default: poc-bucket-
+              required: []

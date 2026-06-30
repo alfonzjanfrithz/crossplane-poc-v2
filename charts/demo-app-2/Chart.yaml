@@ -1,0 +1,6 @@
+apiVersion: v2
+name: demo-app-2
+description: Consumer app in a separate namespace that reads the shared bucket name back from Vault (via an ExternalSecret) and lists objects written by demo-app. Proves cross-namespace resource+secret sharing through Vault.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

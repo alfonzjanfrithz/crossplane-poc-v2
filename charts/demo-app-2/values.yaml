@@ -1,0 +1,17 @@
+# Instance name + namespace for this consumer. It lives in a DIFFERENT
+# namespace from demo-app to prove cross-namespace sharing through Vault.
+name: demo-app-2
+namespace: demo-app-2
+
+# Vault KV path to read from. This is the STABLE key that demo-app's PushSecret
+# writes (secret/crossplane/demo-app-bucket). The consumer does not need to know
+# the dynamic bucket name in advance -- it learns it from Vault at runtime.
+vaultPath: crossplane/demo-app-bucket
+
+image:
+  repository: amazon/aws-cli
+  tag: "2.27.5"
+  pullPolicy: IfNotPresent
+
+# How often the consumer lists the shared bucket's objects.
+pollSeconds: 15

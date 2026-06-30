@@ -1,0 +1,29 @@
+# The per-service provider-aws-s3 must read/manage the family provider's CRDs
+# (ClusterProviderConfig, ProviderConfig, ProviderConfigUsage), but the
+# auto-generated RBAC for provider-aws-s3 omits them because they are declared
+# by the provider-family-aws package. This grants the stable ServiceAccount
+# (pinned via the DeploymentRuntimeConfig) the access it needs.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: read-aws-family-config
+rules:
+  - apiGroups: ["aws.m.upbound.io"]
+    resources: ["clusterproviderconfigs", "providerconfigs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["aws.m.upbound.io"]
+    resources: ["providerconfigusages"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: provider-aws-s3-read-family-config
+subjects:
+  - kind: ServiceAccount
+    name: provider-aws-s3
+    namespace: crossplane-system
+roleRef:
+  kind: ClusterRole
+  name: read-aws-family-config
+  apiGroup: rbac.authorization.k8s.io

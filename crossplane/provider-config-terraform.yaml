@@ -1,0 +1,18 @@
+apiVersion: tf.m.upbound.io/v1beta1
+kind: ClusterProviderConfig
+metadata:
+  name: terraform-default
+spec:
+  # provider-terraform does not persist state. Without a backend the first
+  # observe runs `terraform state list` before any apply and fails with
+  # "No state file was found" (crossplane-contrib/provider-terraform#119).
+  # The kubernetes backend stores tfstate in a Secret in crossplane-system;
+  # state is segregated per Workspace via the workspace name.
+  configuration: |
+    terraform {
+      backend "kubernetes" {
+        secret_suffix     = "tfstate-default"
+        namespace         = "crossplane-system"
+        in_cluster_config = true
+      }
+    }

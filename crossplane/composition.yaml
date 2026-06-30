@@ -1,0 +1,141 @@
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: xbuckets.localstack.s3
+  labels:
+    provider: aws-localstack
+spec:
+  mode: Pipeline
+  compositeTypeRef:
+    apiVersion: platform.acme.io/v1alpha1
+    kind: XBucket
+  pipeline:
+    - step: render-bucket-and-secret
+      functionRef:
+        name: function-patch-and-transform
+      input:
+        apiVersion: pt.fn.crossplane.io/v1beta1
+        kind: Resources
+        resources:
+          # 1. The S3 bucket (v2 namespaced MR). Its name is computed
+          #    deterministically as <prefix><XR-name>-<XR-uid> and set as the
+          #    external name, which upjet maps to the aws_s3_bucket.bucket arg.
+          #    The XR uid is random and stable, so the name has a genuine random
+          #    component while still being knowable to the composition.
+          - name: s3-bucket
+            base:
+              apiVersion: s3.aws.m.upbound.io/v1beta1
+              kind: Bucket
+              metadata:
+                generateName: poc-bucket-mr-
+              spec:
+                forProvider:
+                  region: us-east-1
+                providerConfigRef:
+                  kind: ClusterProviderConfig
+                  name: localstack
+            patches:
+              - type: CombineFromComposite
+                combine:
+                  strategy: string
+                  variables:
+                    - fromFieldPath: spec.bucketPrefix
+                    - fromFieldPath: metadata.name
+                    - fromFieldPath: metadata.uid
+                  string:
+                    fmt: "%s%s-%s"
+                toFieldPath: metadata.annotations[crossplane.io/external-name]
+          # 2. A native Kubernetes Secret composed by Crossplane carrying the
+          #    dynamic bucket name. In v2 the composed Secret lands in the XR's
+          #    own namespace automatically (no namespace patch needed). This is
+          #    the v2-native replacement for the deprecated XR connection secret.
+          - name: bucket-secret
+            base:
+              apiVersion: v1
+              kind: Secret
+              metadata:
+                name: placeholder
+              type: Opaque
+              stringData:
+                bucketName: ""
+            patches:
+              - type: CombineFromComposite
+                combine:
+                  strategy: string
+                  variables:
+                    - fromFieldPath: spec.bucketPrefix
+                    - fromFieldPath: metadata.name
+                    - fromFieldPath: metadata.uid
+                  string:
+                    fmt: "%s%s-%s"
+                toFieldPath: stringData.bucketName
+              - type: FromCompositeFieldPath
+                fromFieldPath: metadata.name
+                toFieldPath: metadata.name
+                transforms:
+                  - type: string
+                    string:
+                      type: Format
+                      fmt: "%s-bucket"
+            # Native Kubernetes objects expose no Ready condition; existence = ready.
+            readinessChecks:
+              - type: None
+          # 3. Crossplane-native Vault sync (the "belt"). A provider-terraform
+          #    Workspace runs terraform apply with the hashicorp/vault provider
+          #    to write the dynamic bucket name into Vault KV. This is the
+          #    v2 namespaced Workspace (tf.m.upbound.io), the substitute for the
+          #    archived provider-vault. The kubernetes state backend is injected
+          #    by the terraform-default ClusterProviderConfig.
+          - name: vault-secret
+            base:
+              apiVersion: tf.m.upbound.io/v1beta1
+              kind: Workspace
+              metadata:
+                generateName: demo-vault-
+              spec:
+                forProvider:
+                  source: Inline
+                  module: |
+                    terraform {
+                      required_providers {
+                        vault = { source = "hashicorp/vault", version = "~> 4.4.0" }
+                      }
+                    }
+                    variable "vault_addr"   { type = string }
+                    variable "vault_token" {
+                      type      = string
+                      sensitive = true
+                    }
+                    variable "bucket_name"   { type = string }
+
+                    provider "vault" {
+                      address = var.vault_addr
+                      token   = var.vault_token
+                    }
+
+                    resource "vault_kv_secret_v2" "bucket" {
+                      mount     = "secret"
+                      name      = "crossplane-native/${var.bucket_name}"
+                      data_json = jsonencode({ bucketName = var.bucket_name })
+                    }
+                  vars:
+                    - key: bucket_name
+                      value: placeholder
+                    - key: vault_addr
+                      value: http://vault.rss.svc.cluster.local:8200
+                    - key: vault_token
+                      value: root
+                providerConfigRef:
+                  kind: ClusterProviderConfig
+                  name: terraform-default
+            patches:
+              - type: CombineFromComposite
+                combine:
+                  strategy: string
+                  variables:
+                    - fromFieldPath: spec.bucketPrefix
+                    - fromFieldPath: metadata.name
+                    - fromFieldPath: metadata.uid
+                  string:
+                    fmt: "%s%s-%s"
+                toFieldPath: spec.forProvider.vars[0].value

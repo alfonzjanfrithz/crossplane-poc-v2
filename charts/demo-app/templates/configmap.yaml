@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.name }}-config
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: demo-app
+    app.kubernetes.io/instance: {{ .Values.name }}
+data:
+  # Template referencing ${BUCKET_NAME}, resolved at pod startup from the
+  # Crossplane-composed Secret. This is how the ConfigMap consumes the resource
+  # that Crossplane created.
+  config.json: |
+    {
+      "bucket": "${BUCKET_NAME}",
+      "endpoint": "http://localstack.localstack-system.svc.cluster.local:4566",
+      "region": "us-east-1",
+      "pollSeconds": {{ .Values.pollSeconds }}
+    }

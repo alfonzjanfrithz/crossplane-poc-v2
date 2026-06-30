@@ -1,0 +1,25 @@
+apiVersion: pkg.crossplane.io/v1beta1
+kind: DeploymentRuntimeConfig
+metadata:
+  name: provider-aws-s3-runtime
+  namespace: crossplane-system
+spec:
+  # Pins a stable ServiceAccount (provider-aws-s3) so the family-config RBAC
+  # binding survives provider revisions. The per-service provider must read the
+  # family's ClusterProviderConfig / ProviderConfigUsage CRDs, which its
+  # auto-generated RBAC omits -- see the read-aws-family-config ClusterRole.
+  deploymentTemplate:
+    spec:
+      selector:
+        matchLabels:
+          pkg.crossplane.io/provider: provider-aws-s3
+      template:
+        metadata:
+          labels:
+            pkg.crossplane.io/provider: provider-aws-s3
+        spec:
+          containers:
+            - name: package-runtime
+  serviceAccountTemplate:
+    metadata:
+      name: provider-aws-s3

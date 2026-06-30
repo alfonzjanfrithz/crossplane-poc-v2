@@ -1,0 +1,20 @@
+# Name of the XBucket XR this chart installs (created directly in v2, no claim).
+# The composed Secret holding the dynamic bucket name will be named
+# "<name>-bucket" (see composition).
+name: demo-app
+
+# Prefix for the generated S3 bucket name; the composition appends the XR name
+# plus a random suffix derived from the XR uid.
+bucketPrefix: poc-demo-
+
+# Where the app runs and where Crossplane writes the composed Secret.
+# Vault stays separate in `rss`; this keeps the demo app in its own namespace.
+namespace: demo-app
+
+image:
+  repository: amazon/aws-cli
+  tag: "2.27.5"
+  pullPolicy: IfNotPresent
+
+# How often the app writes a new object into the bucket.
+pollSeconds: 15

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: demo-app
+description: Demo app that creates a v2 namespaced XBucket XR and consumes the Crossplane-composed S3 bucket name (via a Secret), then writes objects to it.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
