@@ -98,14 +98,14 @@ sed "s/__LOCALSTACK_IP__/$LS_IP/" "$ROOT/crossplane/localstack-service.yaml" \
 echo "==> 5/10  Crossplane function"
 kubectl apply -f "$ROOT/crossplane/function-patch-and-transform.yaml" >/dev/null
 
-echo "==> 6/10  providers (v2): runtime config -> provider-aws-s3 + provider-terraform"
+echo "==> 6/10  providers (v2): runtime config -> provider-aws-s3"
 # DeploymentRuntimeConfig must exist before the provider reconciles so the
 # revision is created with the stable ServiceAccount (provider-aws-s3).
 kubectl apply -f "$ROOT/crossplane/provider-aws-s3-runtime.yaml" >/dev/null
-# provider-terraform runtime config mounts the registry-ca CA bundle and sets
-# SSL_CERT_FILE so `terraform init` can download providers through the proxy.
-kubectl apply -f "$ROOT/crossplane/provider-terraform-runtime.yaml" >/dev/null
 kubectl apply -f "$ROOT/crossplane/providers.yaml" >/dev/null
+# Let Crossplane's composite controller manage the composed ESO PushSecret
+# (the Vault sync). Aggregated ClusterRole, so it must exist before the XR.
+kubectl apply -f "$ROOT/crossplane/eso-pushsecret-rbac.yaml" >/dev/null
 
 # Wait for the stable SA to exist, then bind the family-config RBAC. The
 # per-service provider must read the family's ClusterProviderConfig /
@@ -121,13 +121,11 @@ echo "      waiting for function + providers healthy..."
 kubectl wait --for=jsonpath='{.status.conditions[?(@.type=="Healthy")].status}=True' \
   functions.pkg.crossplane.io/function-patch-and-transform \
   providers.pkg.crossplane.io/provider-aws-s3 \
-  providers.pkg.crossplane.io/provider-terraform \
   --timeout=420s >/dev/null
 
 echo "==> 7/10  ProviderConfigs + XRD + Composition"
 kubectl apply -f "$ROOT/crossplane/aws-creds-secret.yaml" >/dev/null
 kubectl apply -f "$ROOT/crossplane/provider-config.yaml" >/dev/null
-kubectl apply -f "$ROOT/crossplane/provider-config-terraform.yaml" >/dev/null
 kubectl apply -f "$ROOT/crossplane/xrd.yaml" >/dev/null
 kubectl apply -f "$ROOT/crossplane/composition.yaml" >/dev/null
 
@@ -137,8 +135,8 @@ helm upgrade --install demo-app "$ROOT/charts/demo-app" -n demo-app --create-nam
 echo "      waiting for XBucket demo-app to become Ready..."
 kubectl -n demo-app wait xbucket/demo-app --for=condition=Ready --timeout=300s >/dev/null
 
-echo "==> 9/10  Vault sync: composed terraform Workspace writes crossplane/demo-app-bucket"
-echo "       waiting for the composed Workspace to land the value in Vault..."
+echo "==> 9/10  Vault sync: composed ESO PushSecret writes crossplane/demo-app-bucket"
+echo "       waiting for the composed PushSecret to land the value in Vault..."
 for i in $(seq 1 30); do
   v=$(kubectl -n rss exec vault-0 -- vault kv get -field=bucketName secret/crossplane/demo-app-bucket 2>/dev/null || true)
   [ -n "$v" ] && break
@@ -152,10 +150,51 @@ helm upgrade --install demo-app-2 "$ROOT/charts/demo-app-2" -n demo-app-2 --crea
 kubectl -n demo-app-2 wait deploy/demo-app-2 --for=condition=Available --timeout=180s >/dev/null
 
 echo
-echo "All up. Proof commands:"
-echo "  kubectl -n demo-app logs deploy/demo-app                                              # producer writing the dynamic bucket"
-echo "  kubectl -n demo-app-2 logs deploy/demo-app-2                                          # consumer reading it back from Vault"
-echo "  kubectl -n demo-app-2 get externalsecret,secret                                       # ExternalSecret -> local Secret"
-echo "  kubectl -n rss exec vault-0 -- vault kv get secret/crossplane/demo-app-bucket         # the shared value in Vault"
-echo "  podman exec localstack awslocal s3api list-buckets                                    # the shared bucket"
-echo "  ./scripts/down.sh                                                                     # teardown"
+echo "============================================================"
+echo " PROVISIONED INVENTORY  (everything that just got created)"
+echo "============================================================"
+
+echo
+echo "-- Crossplane platform (cluster-scoped) --------------------"
+kubectl get providers.pkg.crossplane.io,functions.pkg.crossplane.io 2>/dev/null || true
+kubectl get xrd,compositions 2>/dev/null || true
+kubectl get clusterproviderconfigs.aws.m.upbound.io 2>/dev/null || true
+
+echo
+echo "-- crossplane-system (controllers) -------------------------"
+kubectl -n crossplane-system get pods 2>/dev/null || true
+
+echo
+echo "-- demo-app  (PRODUCER namespace) --------------------------"
+echo "   XR -> composed Bucket + Secret + PushSecret, plus the producer app + its SecretStore"
+kubectl -n demo-app get xbucket,bucket.s3.aws.m.upbound.io,pushsecret,secretstore,secret,deploy,pods 2>/dev/null || true
+
+echo
+echo "-- demo-app-2  (CONSUMER namespace) ------------------------"
+echo "   ExternalSecret pulls the value from Vault into a local Secret the app reads"
+kubectl -n demo-app-2 get externalsecret,secretstore,secret,deploy,pods 2>/dev/null || true
+
+echo
+echo "-- rss  (Vault) --------------------------------------------"
+kubectl -n rss get pods 2>/dev/null || true
+echo "   value the composed PushSecret wrote (secret/crossplane/demo-app-bucket):"
+kubectl -n rss exec vault-0 -- vault kv get secret/crossplane/demo-app-bucket 2>/dev/null || echo "     (not present yet)"
+
+echo
+echo "-- localstack-system  (in-cluster route to LocalStack) -----"
+kubectl -n localstack-system get svc,endpoints 2>/dev/null || true
+echo "   buckets in LocalStack:"
+podman exec localstack awslocal s3api list-buckets 2>/dev/null || true
+
+echo
+echo "============================================================"
+echo " WHERE TO LOOK NEXT  (copy/paste)"
+echo "============================================================"
+echo "  kubectl -n demo-app logs deploy/demo-app                                       # producer writing the dynamic bucket"
+echo "  kubectl -n demo-app-2 logs deploy/demo-app-2                                    # consumer reading it back from Vault"
+echo "  kubectl -n demo-app describe xbucket demo-app                                   # the XR + its composed resourceRefs"
+echo "  kubectl -n demo-app get pushsecret -o wide                                      # producer -> Vault (PushSecret), Ready=True"
+echo "  kubectl -n demo-app-2 get externalsecret,secret                                 # Vault -> local Secret (ExternalSecret)"
+echo "  kubectl -n rss exec vault-0 -- vault kv get secret/crossplane/demo-app-bucket   # the shared value in Vault"
+echo "  podman exec localstack awslocal s3api list-buckets                              # the shared bucket"
+echo "  ./scripts/down.sh                                                               # teardown"

@@ -4,7 +4,7 @@ name: demo-app-2
 namespace: demo-app-2
 
 # Vault KV path to read from. This is the STABLE key that the producer's
-# composed terraform Workspace writes (secret/crossplane/demo-app-bucket). The
+# composed PushSecret writes (secret/crossplane/demo-app-bucket). The
 # consumer does not need to know the dynamic bucket name in advance -- it learns
 # it from Vault at runtime.
 vaultPath: crossplane/demo-app-bucket

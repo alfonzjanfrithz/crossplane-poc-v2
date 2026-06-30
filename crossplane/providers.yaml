@@ -9,15 +9,5 @@ spec:
   runtimeConfigRef:
     name: provider-aws-s3-runtime
     kind: DeploymentRuntimeConfig
----
-apiVersion: pkg.crossplane.io/v1
-kind: Provider
-metadata:
-  name: provider-terraform
-spec:
-  # Namespaced MRs under tf.m.upbound.io. Used for the Crossplane-native
-  # Vault sync (terraform hashicorp/vault provider inside a Workspace).
-  package: xpkg.upbound.io/crossplane-contrib/provider-terraform:v1.1.1
-  runtimeConfigRef:
-    name: provider-terraform-runtime
-    kind: DeploymentRuntimeConfig
+# Vault sync no longer uses provider-terraform -- it is done by a composed ESO
+# PushSecret (see crossplane/composition.yaml), so no terraform provider here.

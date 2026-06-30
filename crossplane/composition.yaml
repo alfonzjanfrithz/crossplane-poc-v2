@@ -80,74 +80,63 @@ spec:
             # Native Kubernetes objects expose no Ready condition; existence = ready.
             readinessChecks:
               - type: None
-          # 3. Vault sync, in-composite and lifecycle-coupled. A provider-terraform
-          #    Workspace runs terraform apply with the hashicorp/vault provider to
-          #    publish the bucket name into Vault KV at a STABLE, consumer-knowable
-          #    path (crossplane/<xr-name>-bucket). Because the Workspace is a
-          #    composed resource, terraform destroy runs when the XR is deleted, so
-          #    the Vault entry dies with the bucket -- no orphaned secrets. This is
-          #    the v2 namespaced Workspace (tf.m.upbound.io), the substitute for the
-          #    archived provider-vault. The kubernetes state backend is injected by
-          #    the terraform-default ClusterProviderConfig.
+          # 3. Vault sync, in-composite and lifecycle-coupled. An ESO PushSecret
+          #    pushes the composed Secret's bucketName into Vault KV at a STABLE,
+          #    consumer-knowable path (crossplane/<xr-name>-bucket). Because the
+          #    PushSecret is itself a composed resource it shares the XR's
+          #    lifecycle, and deletionPolicy: Delete makes ESO remove the Vault
+          #    entry when the XR (hence this PushSecret) is deleted -- so the secret
+          #    dies with the bucket, no orphans. This replaces the provider-terraform
+          #    Workspace: no terraform, no registry.terraform.io plugin pulls, no
+          #    tfstate backend. It pushes through the namespace's vault-backend
+          #    SecretStore (created by the demo-app chart) into the same Vault that
+          #    demo-app-2 reads from -- the producer and consumer are now symmetric
+          #    ESO objects (PushSecret out, ExternalSecret in).
           - name: vault-secret
             base:
-              apiVersion: tf.m.upbound.io/v1beta1
-              kind: Workspace
+              apiVersion: external-secrets.io/v1alpha1
+              kind: PushSecret
               metadata:
                 generateName: demo-vault-
               spec:
-                forProvider:
-                  source: Inline
-                  module: |
-                    terraform {
-                      required_providers {
-                        vault = { source = "hashicorp/vault", version = "~> 4.4.0" }
-                      }
-                    }
-                    variable "vault_addr"   { type = string }
-                    variable "vault_token" {
-                      type      = string
-                      sensitive = true
-                    }
-                    variable "bucket_name"   { type = string }
-                    variable "xr_name"        { type = string }
-
-                    provider "vault" {
-                      address = var.vault_addr
-                      token   = var.vault_token
-                    }
-
-                    resource "vault_kv_secret_v2" "bucket" {
-                      mount     = "secret"
-                      name      = "crossplane/${var.xr_name}-bucket"
-                      data_json = jsonencode({ bucketName = var.bucket_name })
-                    }
-                  vars:
-                    - key: bucket_name
-                      value: placeholder
-                    - key: xr_name
-                      value: placeholder
-                    - key: vault_addr
-                      value: http://vault.rss.svc.cluster.local:8200
-                    - key: vault_token
-                      value: root
-                providerConfigRef:
-                  kind: ClusterProviderConfig
-                  name: terraform-default
+                refreshInterval: 10s
+                # Remove the value from Vault when this PushSecret is deleted.
+                deletionPolicy: Delete
+                secretStoreRefs:
+                  - name: vault-backend
+                    kind: SecretStore
+                selector:
+                  secret:
+                    name: placeholder   # patched to <xr-name>-bucket
+                data:
+                  - match:
+                      secretKey: bucketName
+                      remoteRef:
+                        remoteKey: placeholder   # patched to crossplane/<xr-name>-bucket
+                        property: bucketName
             patches:
-              # bucket_name (dynamic <prefix><xr-name><uid>) -> vars[0]
-              - type: CombineFromComposite
-                combine:
-                  strategy: string
-                  variables:
-                    - fromFieldPath: spec.bucketPrefix
-                    - fromFieldPath: metadata.name
-                    - fromFieldPath: metadata.uid
-                  string:
-                    fmt: "%s%s-%s"
-                toFieldPath: spec.forProvider.vars[0].value
-              # xr_name (stable XR metadata.name) -> vars[1], used to build the
-              # consumer-knowable Vault path crossplane/<xr-name>-bucket.
+              # source Secret name = <xr-name>-bucket (the composed Secret above)
               - type: FromCompositeFieldPath
                 fromFieldPath: metadata.name
-                toFieldPath: spec.forProvider.vars[1].value
+                toFieldPath: spec.selector.secret.name
+                transforms:
+                  - type: string
+                    string:
+                      type: Format
+                      fmt: "%s-bucket"
+              # Vault path = crossplane/<xr-name>-bucket (what demo-app-2 reads)
+              - type: FromCompositeFieldPath
+                fromFieldPath: metadata.name
+                toFieldPath: spec.data[0].match.remoteRef.remoteKey
+                transforms:
+                  - type: string
+                    string:
+                      type: Format
+                      fmt: "crossplane/%s-bucket"
+            # PushSecret reports Ready=True once it has synced to Vault, so coupling
+            # XR readiness to it proves the value actually landed (the demo's point).
+            readinessChecks:
+              - type: MatchCondition
+                matchCondition:
+                  type: Ready
+                  status: "True"

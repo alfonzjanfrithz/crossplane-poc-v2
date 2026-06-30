@@ -2,7 +2,7 @@
 {{- $ns := .Values.namespace -}}
 # v2: the application creates the namespaced composite resource directly (no
 # claim). Crossplane renders it in this namespace and the composed resources
-# (S3 Bucket, Secret, Vault-sync Workspace) land here too.
+# (S3 Bucket, Secret, Vault-sync PushSecret) land here too.
 apiVersion: platform.acme.io/v1alpha1
 kind: XBucket
 metadata:

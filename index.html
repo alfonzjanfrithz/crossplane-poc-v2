@@ -30,11 +30,11 @@
 producer app creates a <b>namespaced composite resource</b>
 (<code>XBucket</code>); Crossplane composes an S3 bucket (via the <b>v2 native
 per-service AWS provider</b>), materialises the dynamic bucket name into a
-Secret, and &mdash; <b>inside the same composition</b> &mdash; runs a terraform
-<code>Workspace</code> that publishes that name to Vault. Putting the Vault write
+Secret, and &mdash; <b>inside the same composition</b> &mdash; uses an ESO
+<code>PushSecret</code> to publish that name to Vault. Putting the Vault write
 <i>in the composite</i> makes it <b>lifecycle-coupled</b>: when the XR is deleted,
-<code>terraform destroy</code> removes the Vault entry, so no secret outlives its
-resource. A <b>second app in a separate namespace</b> then reads that value back out of
+the composed PushSecret is deleted too and ESO removes the Vault entry, so no
+secret outlives its resource. A <b>second app in a separate namespace</b> then reads that value back out of
 Vault via an ESO <code>ExternalSecret</code> and accesses the same shared bucket
 — proving cross-namespace resource + secret sharing with Vault as the substrate.</p>
 <p>One command brings it all up: <code>./scripts/up.sh</code></p>
@@ -42,12 +42,12 @@ Vault via an ESO <code>ExternalSecret</code> and accesses the same shared bucket
 <h2>Architecture</h2>
 <ul>
 <li><b>Three namespaces</b>: <code>demo-app</code> (producer), <code>demo-app-2</code> (consumer), <code>rss</code> (Vault).</li>
-<li><b>Producer creates a namespaced <code>XBucket</code></b> XR; Crossplane composes a real S3 bucket in LocalStack (via the v2 native per-service AWS provider), a native Secret carrying the dynamic bucket name, and a terraform <code>Workspace</code>.</li>
-<li><b>Dynamic value &rarr; Vault, in-composite</b>: the composed <code>Workspace</code> writes the bucket name to Vault at a <b>stable, consumer-knowable</b> path (<code>crossplane/&lt;xr-name&gt;-bucket</code>). It is lifecycle-coupled &mdash; the entry is deleted with the bucket.</li>
+<li><b>Producer creates a namespaced <code>XBucket</code></b> XR; Crossplane composes a real S3 bucket in LocalStack (via the v2 native per-service AWS provider), a native Secret carrying the dynamic bucket name, and an ESO <code>PushSecret</code>.</li>
+<li><b>Dynamic value &rarr; Vault, in-composite</b>: the composed <code>PushSecret</code> writes the bucket name to Vault at a <b>stable, consumer-knowable</b> path (<code>crossplane/&lt;xr-name&gt;-bucket</code>). It is lifecycle-coupled &mdash; the entry is deleted with the bucket.</li>
 <li><b>Consumer pulls it back</b> from Vault via an ESO <code>ExternalSecret</code> in a separate namespace, then reads the same shared bucket.</li>
 <li><b>Vault is the sharing substrate</b> &mdash; no direct cross-namespace Secret access; the value round-trips through Vault.</li>
 <li><b>LocalStack</b> runs outside the cluster on podman, reached via an in-cluster headless <code>Service</code> + manual <code>Endpoints</code>.</li>
-<li><b>Fully v2-native</b>: namespaced XRs and MRs (<code>s3.aws.m.upbound.io</code>, <code>tf.m.upbound.io</code>), no claims, composed resources inherit the XR's namespace.</li>
+<li><b>Fully v2-native</b>: namespaced XRs and MRs (<code>s3.aws.m.upbound.io</code>), no claims, composed resources inherit the XR's namespace.</li>
 </ul>
 <div class="mermaid">
 flowchart TD
@@ -56,7 +56,7 @@ flowchart TD
     XR["XBucket demo-app platform.acme.io"]
     BKT["Bucket s3.aws.m.upbound.io poc-demo-demo-app-uid"]
     SEC["Secret demo-app-bucket bucketName dynamic"]
-    WS["Workspace tf.m.upbound.io writes Vault stable key"]
+    PS["PushSecret external-secrets.io writes Vault stable key"]
   end
   subgraph NS2["namespace demo-app-2 consumer"]
     ES["ExternalSecret shared-bucket pulls from Vault"]
@@ -65,7 +65,7 @@ flowchart TD
   end
   XR -->|"composition"| BKT
   XR -->|"composition"| SEC
-  XR -->|"composition"| WS
+  XR -->|"composition"| PS
   SEC -.->|"read by producer"| APP
   subgraph LS["LocalStack podman"]
     S3["S3 poc-demo-demo-app-uid shared"]
@@ -76,7 +76,7 @@ flowchart TD
   subgraph RSS["namespace rss"]
     VAULT["Vault dev"]
   end
-  WS -->|"terraform apply lifecycle-coupled"| VAULT
+  PS -->|"PushSecret push lifecycle-coupled"| VAULT
   VAULT -->|"ExternalSecret pull"| ES
   ES -->|"creates"| SEC2
   APP2 -->|"env from"| SEC2
@@ -89,8 +89,8 @@ each seam, in data-flow order.</p>
 <p><b>Seam 1 &mdash; one expression computes the dynamic name and threads it everywhere</b>
 (<code>crossplane/composition.yaml</code>). The same value
 (<code>&lt;prefix&gt;&lt;XR-name&gt;&lt;XR-uid&gt;</code>) is stamped into the
-Bucket's external name <b>and</b> the Secret's <code>bucketName</code> <b>and</b>
-the terraform <code>bucket_name</code> var (Seam 2).</p>
+Bucket's external name <b>and</b> the Secret's <code>bucketName</code>, which the
+PushSecret (Seam 2) then pushes to Vault.</p>
 <pre><code class="language-yaml">- type: CombineFromComposite
   combine:
     strategy: string
@@ -102,25 +102,33 @@ the terraform <code>bucket_name</code> var (Seam 2).</p>
       fmt: "%s%s-%s"
   toFieldPath: metadata.annotations[crossplane.io/external-name]</code></pre>
 
-<p><b>Seam 2 &mdash; composed Workspace &rarr; Vault, native Crossplane (lifecycle-coupled)</b>
-(<code>crossplane/composition.yaml</code>, the vault-secret Workspace). A
-<code>provider-terraform</code> Workspace runs <code>terraform apply</code> with
-the hashicorp/vault provider. Two vars are patched from the XR:
-<code>bucket_name</code> (dynamic, Seam 1) becomes the <b>value</b>, and
-<code>xr_name</code> (the stable XR <code>metadata.name</code>) builds the
-<b>key</b>. Crossplane reconciles this itself &mdash; no external operator &mdash;
-and <code>terraform destroy</code> removes the entry when the XR is deleted.</p>
+<p><b>Seam 2 &mdash; composed PushSecret &rarr; Vault, ESO (lifecycle-coupled)</b>
+(<code>crossplane/composition.yaml</code>, the <code>vault-secret</code>
+PushSecret). An ESO <code>PushSecret</code> reads the composed Secret and pushes
+its <code>bucketName</code> into Vault. The Vault <b>key</b> is built from the
+XR's stable <code>metadata.name</code> (<code>crossplane/&lt;xr-name&gt;-bucket</code>);
+the <b>value</b> is the dynamic bucket name from Seam 1. It is a composed resource,
+so it shares the XR's lifecycle, and <code>deletionPolicy: Delete</code> makes ESO
+remove the entry when the XR is deleted.</p>
 <pre><code class="language-yaml">- type: FromCompositeFieldPath
   fromFieldPath: metadata.name              # XR name -&gt; stable Vault key
-  toFieldPath: spec.forProvider.vars[1].value   # xr_name</code></pre>
-<pre><code class="language-hcl">resource "vault_kv_secret_v2" "bucket" {
-  mount     = "secret"
-  name      = "crossplane/${var.xr_name}-bucket"        # stable, consumer-knowable key
-  data_json = jsonencode({ bucketName = var.bucket_name })  # dynamic value
-}</code></pre>
+  toFieldPath: spec.data[0].match.remoteRef.remoteKey
+  transforms:
+    - type: string
+      string: { type: Format, fmt: "crossplane/%s-bucket" }</code></pre>
+<pre><code class="language-yaml">spec:
+  deletionPolicy: Delete                       # value removed from Vault on XR delete
+  secretStoreRefs:
+    - { name: vault-backend, kind: SecretStore }
+  selector:
+    secret: { name: &lt;xr-name&gt;-bucket }         # the composed Secret (Seam 1)
+  data:
+    - match:
+        secretKey: bucketName
+        remoteRef: { remoteKey: crossplane/&lt;xr-name&gt;-bucket, property: bucketName }</code></pre>
 
 <p><b>Seam 3 &mdash; Vault &rarr; consumer Secret, ESO pull</b>
-(<code>charts/demo-app-2/templates/eso.yaml</code>). The inverse of the Workspace
+(<code>charts/demo-app-2/templates/eso.yaml</code>). The inverse of the PushSecret
 write (Seam 2), in a different namespace: an <code>ExternalSecret</code> reads the
 stable key back out of Vault into a local Secret &mdash; closing the loop
 cross-namespace (demo-app-2 never touches demo-app).</p>
@@ -145,8 +153,8 @@ the chain.</p>
         key: bucketName</code></pre>
 
 <p style="font-size:.92em;color:rgba(127,127,127,.9)"><b>Throughline:</b> Seam 1
-threads the dynamic name into the Bucket, the Secret, and the terraform value.
-Seam 2 is the single in-composite Vault write &mdash; lifecycle-coupled, so the
+threads the dynamic name into the Bucket and the Secret. Seam 2 is the single
+in-composite Vault write &mdash; an ESO PushSecret, lifecycle-coupled, so the
 secret dies with the bucket &mdash; using the XR's stable name as the key. Seam 3
 is the pull that closes the loop in another namespace; Seam 4 is the app using
 it.</p>
@@ -159,7 +167,6 @@ it.</p>
 <tr><td>XR API</td><td>apiextensions.crossplane.io/v1</td><td>apiextensions.crossplane.io/v2</td></tr>
 <tr><td>XR machinery</td><td>spec.compositionRef</td><td>spec.crossplane.compositionRef</td></tr>
 <tr><td>S3 managed resource</td><td>s3.aws.crossplane.io (cluster)</td><td>s3.aws.m.upbound.io (<b>namespaced</b>)</td></tr>
-<tr><td>Terraform MR</td><td>tf.upbound.io (cluster)</td><td>tf.m.upbound.io (<b>namespaced</b>)</td></tr>
 <tr><td>AWS provider</td><td>monolithic provider-aws v0.49 ~800 MRs</td><td><b>per-service</b> provider-aws-s3 v2.0.0 + family</td></tr>
 <tr><td>Connection secret</td><td>writeConnectionSecretToRef</td><td><b>composed native Secret</b></td></tr>
 </table>
@@ -209,6 +216,19 @@ creds (no SDK-chain fallback); there is no Environment source. Use
 machinery under <code>spec.crossplane</code>.
 </div>
 
+<div class="gotcha">
+<b>8. Composing a non-provider CRD (PushSecret) needs aggregated RBAC</b> —
+Crossplane's composite controller composes resources using the core
+<code>crossplane</code> ServiceAccount. It has RBAC for core types (the composed
+<code>Secret</code>) and for installed providers' MRs, but <b>not</b> for arbitrary
+CRDs like ESO's <code>PushSecret</code> — composing one fails with
+<code>cannot create PushSecret: ...forbidden</code>. Fix:
+<code>crossplane/eso-pushsecret-rbac.yaml</code>, a <code>ClusterRole</code> labelled
+<code>rbac.crossplane.io/aggregate-to-crossplane: "true"</code> granting CRUD on
+<code>pushsecrets.external-secrets.io</code> (the PushSecret equivalent of the
+family-config RBAC in gotcha #2).
+</div>
+
 <h2>Lessons learned: what cost rework</h2>
 <p>Honest retrospective — each row caused an apply-fail-retry loop or a debugging detour.</p>
 <table>
@@ -229,7 +249,7 @@ even arriving?) and reasoning about the whole chain before changing anything.</p
 <pre><code class="language-bash"># producer XR + composed namespaced resources, all Ready
 kubectl -n demo-app get xbucket
 kubectl -n demo-app get bucket.s3.aws.m.upbound.io
-kubectl -n demo-app get workspace.tf.m.upbound.io
+kubectl -n demo-app get pushsecret
 
 # producer writing objects to the dynamic bucket every ~15s
 kubectl -n demo-app logs deploy/demo-app
@@ -237,7 +257,7 @@ kubectl -n demo-app logs deploy/demo-app
 # the shared bucket really exists in LocalStack
 podman exec localstack awslocal s3api list-buckets
 
-# the bucket name in Vault, written by the composed Workspace
+# the bucket name in Vault, written by the composed PushSecret
 kubectl -n rss exec vault-0 -- vault kv get secret/crossplane/demo-app-bucket
 
 # CONSUMER: pulled the same value back from Vault (Synced=True)
@@ -250,16 +270,16 @@ kubectl -n demo-app-2 logs deploy/demo-app-2</code></pre>
 <pre><code class="nohighlight">crossplane-poc-v2/
   kind/config.yaml                       kind cluster podman
   crossplane/
-    providers.yaml                       provider-aws-s3 v2 + provider-terraform
+    providers.yaml                       provider-aws-s3 v2
     provider-aws-s3-runtime.yaml         DeploymentRuntimeConfig stable SA
     provider-aws-s3-rbac.yaml            family-config RBAC
+    eso-pushsecret-rbac.yaml             lets Crossplane compose ESO PushSecrets
     aws-creds-secret.yaml                LocalStack creds INI
     provider-config.yaml                 ClusterProviderConfig AWS LocalStack
-    provider-config-terraform.yaml       ClusterProviderConfig tf k8s backend
     localstack-service.yaml              in-cluster Service manual Endpoints
     xrd.yaml                             XBucket XRD v2 Namespaced no claims
-    composition.yaml                     Bucket Secret Vault Workspace
-  charts/demo-app/                       producer Helm XBucket ConfigMap Deployment
+    composition.yaml                     Bucket Secret Vault PushSecret
+  charts/demo-app/                       producer Helm XBucket SecretStore ConfigMap Deployment
   charts/demo-app-2/                     consumer Helm ExternalSecret Deployment
   scripts/up.sh down.sh                  bootstrap teardown</code></pre>
 
@@ -269,7 +289,7 @@ kubectl -n demo-app-2 logs deploy/demo-app-2</code></pre>
 <h3>Bootstrap &amp; cluster</h3>
 <table>
 <tr><th>File</th><th>Role</th><th>What's inside that matters</th></tr>
-<tr><td><code>scripts/up.sh</code></td><td>Idempotent 10-step bootstrap</td><td>Ordering is load-bearing: LocalStack &rarr; kind &rarr; helm &rarr; function &rarr; <b>runtime config before providers</b> &rarr; wait stable SA &rarr; <b>RBAC</b> &rarr; wait healthy &rarr; ProviderConfigs &rarr; XRD/Composition &rarr; demo-app &rarr; (composed Workspace writes Vault) &rarr; <b>demo-app-2 consumer</b> (waits for the value to be in Vault first). Step 0 has an <b>inotify preflight</b> (warns if &lt; 512).</td></tr>
+<tr><td><code>scripts/up.sh</code></td><td>Idempotent 10-step bootstrap</td><td>Ordering is load-bearing: LocalStack &rarr; kind &rarr; helm &rarr; function &rarr; <b>runtime config before providers</b> &rarr; wait stable SA &rarr; <b>RBAC</b> &rarr; wait healthy &rarr; ProviderConfigs &rarr; XRD/Composition &rarr; demo-app &rarr; (composed PushSecret writes Vault) &rarr; <b>demo-app-2 consumer</b> (waits for the value to be in Vault first), then prints a <b>provisioned inventory</b> of everything created. Step 0 has an <b>inotify preflight</b> (warns if &lt; 512).</td></tr>
 <tr><td><code>scripts/down.sh</code></td><td>Teardown</td><td><code>kind delete cluster</code> + <code>podman rm localstack</code>; <code>--purge</code> also removes the kindest/node image.</td></tr>
 <tr><td><code>kind/config.yaml</code></td><td>kind cluster (podman)</td><td>Single control-plane node; needs <code>KIND_EXPERIMENTAL_PROVIDER=podman</code>. Never add <code>extraMounts: /var/run</code> (collides with the /var/run &rarr; /run symlink).</td></tr>
 </table>
@@ -277,13 +297,13 @@ kubectl -n demo-app-2 logs deploy/demo-app-2</code></pre>
 <h3>Provider plumbing (v2-native AWS stack)</h3>
 <table>
 <tr><th>File</th><th>Role</th><th>What's inside that matters</th></tr>
-<tr><td><code>crossplane/providers.yaml</code></td><td>Installs the v2 providers</td><td><code>provider-aws-s3:v2.0.0</code> (auto-resolves <code>provider-family-aws</code> &mdash; do <b>not</b> install family manually) + <code>provider-terraform:v1.1.1</code>. aws-s3 carries <code>runtimeConfigRef</code>.</td></tr>
+<tr><td><code>crossplane/providers.yaml</code></td><td>Installs the v2 provider</td><td><code>provider-aws-s3:v2.0.0</code> (auto-resolves <code>provider-family-aws</code> &mdash; do <b>not</b> install family manually). It carries <code>runtimeConfigRef</code> &rarr; the stable-SA runtime config. No terraform provider &mdash; the Vault sync is a composed ESO PushSecret.</td></tr>
 <tr><td><code>crossplane/provider-aws-s3-runtime.yaml</code></td><td>DeploymentRuntimeConfig</td><td>Pins a <b>stable SA</b> <code>provider-aws-s3</code> via <code>serviceAccountTemplate</code> so the family-config RBAC binding survives revisions. Must set <code>selector</code> + matching template labels.</td></tr>
 <tr><td><code>crossplane/provider-aws-s3-rbac.yaml</code></td><td>Family-config RBAC (upjet gap fix)</td><td><code>ClusterRole read-aws-family-config</code>: read on clusterproviderconfigs/providerconfigs + full CRUD on providerconfigusages (all <code>aws.m.upbound.io</code>), bound to the stable SA.</td></tr>
 <tr><td><code>crossplane/provider-config.yaml</code></td><td>AWS ClusterProviderConfig (<code>localstack</code>)</td><td>Make-or-break bits: <code>endpoint.source: Custom</code> <b>and</b> <code>endpoint.services: [s3]</code> (both required or traffic goes to real AWS), static URL, <code>credentials.source: Secret</code>, plus all LocalStack helpers (skip_*, s3_use_path_style). See gotchas #4/#5.</td></tr>
 <tr><td><code>crossplane/aws-creds-secret.yaml</code></td><td>LocalStack credentials</td><td>INI body (<code>[default]</code> + test/test) consumed by provider-config.yaml.</td></tr>
-<tr><td><code>crossplane/provider-config-terraform.yaml</code></td><td>tf ClusterProviderConfig (<code>terraform-default</code>)</td><td>terraform <code>kubernetes</code> backend storing tfstate in a Secret &mdash; <b>required</b>: provider-terraform doesn't persist state, else "No state file was found".</td></tr>
-<tr><td><code>crossplane/localstack-service.yaml</code></td><td>In-cluster route to LocalStack</td><td>Headless Service (no selector) + manual Endpoints at pinned podman IP 10.89.1.10 &rarr; DNS <code>localstack.localstack-system.svc:4566</code>.</td></tr>
+<tr><td><code>crossplane/eso-pushsecret-rbac.yaml</code></td><td>Lets Crossplane compose <code>PushSecret</code>s</td><td>Aggregated <code>ClusterRole</code> (<code>rbac.crossplane.io/aggregate-to-crossplane: true</code>) granting the composite controller CRUD on <code>pushsecrets.external-secrets.io</code> &mdash; without it, composing the Vault-sync PushSecret fails <code>forbidden</code> (see gotcha #8).</td></tr>
+<tr><td><code>crossplane/localstack-service.yaml</code></td><td>In-cluster route to LocalStack</td><td>Headless Service (no selector) + manual Endpoints at the podman IP up.sh discovers at runtime (placeholder <code>__LOCALSTACK_IP__</code>, nothing hardcoded) &rarr; DNS <code>localstack.localstack-system.svc:4566</code>.</td></tr>
 <tr><td><code>crossplane/function-patch-and-transform.yaml</code></td><td>Composition function</td><td>v2 renders compositions via <b>functions</b> (native P&amp;T removed). Pinned v0.10.7.</td></tr>
 </table>
 
@@ -291,7 +311,7 @@ kubectl -n demo-app-2 logs deploy/demo-app-2</code></pre>
 <table>
 <tr><th>File</th><th>Role</th><th>What's inside that matters</th></tr>
 <tr><td><code>crossplane/xrd.yaml</code></td><td>XBucket XRD</td><td><code>apiextensions.crossplane.io/v2</code>, <code>scope: Namespaced</code>, <b>no claimNames</b> (v2 drops claims). One input field <code>spec.bucketPrefix</code>.</td></tr>
-<tr><td><code>crossplane/composition.yaml</code></td><td>The composition</td><td>Pipeline &rarr; function-patch-and-transform. Renders 3 resources in the XR's namespace automatically: <code>Bucket</code> (s3.aws.m.upbound.io), a native <code>Secret</code> (connection-secret replacement), and a <code>Workspace</code> (tf.m.upbound.io) for the <b>in-composite, lifecycle-coupled</b> Vault write (<code>terraform destroy</code> on XR deletion removes the Vault entry). Deterministic name <code>prefix + XR name + XR uid</code> via CombineFromComposite, set as external-name. The Workspace writes Vault key <code>crossplane/&lt;xr-name&gt;-bucket</code> (value = dynamic bucket name); <code>xr_name</code> is patched from the XR <code>metadata.name</code>.</td></tr>
+<tr><td><code>crossplane/composition.yaml</code></td><td>The composition</td><td>Pipeline &rarr; function-patch-and-transform. Renders 3 resources in the XR's namespace automatically: <code>Bucket</code> (s3.aws.m.upbound.io), a native <code>Secret</code> (connection-secret replacement), and an ESO <code>PushSecret</code> (external-secrets.io) for the <b>in-composite, lifecycle-coupled</b> Vault write (<code>deletionPolicy: Delete</code> removes the Vault entry when the XR is deleted). Deterministic name <code>prefix + XR name + XR uid</code> via CombineFromComposite, set as external-name. The PushSecret writes Vault key <code>crossplane/&lt;xr-name&gt;-bucket</code> (value = dynamic bucket name); the key is patched from the XR <code>metadata.name</code>.</td></tr>
 </table>
 
 <h3>Demo app (Helm chart) &mdash; producer</h3>
@@ -300,15 +320,16 @@ kubectl -n demo-app-2 logs deploy/demo-app-2</code></pre>
 <tr><td><code>charts/demo-app/templates/xr.yaml</code></td><td>App creates the XR directly</td><td><code>kind: XBucket</code> in the release namespace with <code>spec.crossplane.compositionRef</code> (v2 path). <b>No claim.</b></td></tr>
 <tr><td><code>charts/demo-app/templates/deployment.yaml</code></td><td>The producer app</td><td>Reads <code>demo-app-bucket</code> via secretKeyRef &rarr; writes an object to LocalStack every <code>pollSeconds</code>.</td></tr>
 <tr><td><code>charts/demo-app/templates/configmap.yaml</code></td><td>App config template</td><td><code>${BUCKET_NAME}</code> substituted from the Secret at pod startup &mdash; how the app consumes what Crossplane created.</td></tr>
+<tr><td><code>charts/demo-app/templates/eso.yaml</code></td><td>Producer Vault <code>SecretStore</code></td><td>A namespace-local <code>vault-token</code> Secret + <code>SecretStore</code> in demo-app that the composed PushSecret pushes through (a SecretStore can't be shared across namespaces &mdash; the mirror of demo-app-2's).</td></tr>
 <tr><td><code>charts/demo-app/values.yaml</code></td><td>Config knobs</td><td><code>name</code>, <code>bucketPrefix</code> (poc-demo-), <code>namespace</code> (demo-app), image, pollSeconds.</td></tr>
 </table>
 
 <h3>Consumer app (Helm chart) &mdash; demo-app-2, cross-namespace reader</h3>
 <table>
 <tr><th>File</th><th>Role</th><th>What's inside that matters</th></tr>
-<tr><td><code>charts/demo-app-2/templates/eso.yaml</code></td><td>Pull value from Vault</td><td>Three objects in demo-app-2: its own <code>vault-token</code> + namespace-scoped <code>SecretStore</code> (a SecretStore can't be shared across namespaces), and an <b>ExternalSecret</b> &mdash; the inverse of the composed Workspace write &mdash; materialising <code>secret/crossplane/demo-app-bucket</code> into a local Secret <code>shared-bucket</code>.</td></tr>
+<tr><td><code>charts/demo-app-2/templates/eso.yaml</code></td><td>Pull value from Vault</td><td>Three objects in demo-app-2: its own <code>vault-token</code> + namespace-scoped <code>SecretStore</code> (a SecretStore can't be shared across namespaces), and an <b>ExternalSecret</b> &mdash; the inverse of the composed PushSecret write &mdash; materialising <code>secret/crossplane/demo-app-bucket</code> into a local Secret <code>shared-bucket</code>.</td></tr>
 <tr><td><code>charts/demo-app-2/templates/deployment.yaml</code></td><td>The consumer app</td><td>secretKeyRef on <code>shared-bucket</code>. The pod <b>will not start until that Secret exists</b> (i.e. until the ExternalSecret pulled from Vault), so pod readiness self-proves the chain. Lists objects the producer writes to the shared bucket.</td></tr>
-<tr><td><code>charts/demo-app-2/values.yaml</code></td><td>Config knobs</td><td><code>name</code>/<code>namespace</code> (demo-app-2), <code>vaultPath</code> (crossplane/demo-app-bucket &mdash; the stable key the composed Workspace writes), image, pollSeconds.</td></tr>
+<tr><td><code>charts/demo-app-2/values.yaml</code></td><td>Config knobs</td><td><code>name</code>/<code>namespace</code> (demo-app-2), <code>vaultPath</code> (crossplane/demo-app-bucket &mdash; the stable key the composed PushSecret writes), image, pollSeconds.</td></tr>
 </table>
 
 <h2>PoC shortcuts vs production requirements</h2>
@@ -316,19 +337,18 @@ kubectl -n demo-app-2 logs deploy/demo-app-2</code></pre>
 <table>
 <tr><th>Area</th><th>PoC shortcut (NOT for prod)</th><th>Production requirement</th></tr>
 <tr><td>Vault</td><td>dev mode, literal <code>root</code> token, in-memory, HTTP</td><td>real auth (Kubernetes / PKI), persistent raft storage, TLS</td></tr>
-<tr><td>Cloud credentials</td><td><code>test</code>/<code>test</code> + <code>token: root</code> hardcoded in manifests</td><td>IRSA / WebIdentity / PodIdentity for AWS; Vault token from real auth; never in git</td></tr>
+<tr><td>Cloud credentials</td><td><code>test</code>/<code>test</code> + <code>token: root</code> hardcoded in manifests (producer + consumer <code>vault-token</code> Secrets)</td><td>IRSA / WebIdentity / PodIdentity for AWS; Vault token from real auth; never in git</td></tr>
 <tr><td>Secret material</td><td>plaintext composed Secret (<code>bucketName</code>)</td><td>encryption at rest + rotation; sensitive outputs via a real secret store</td></tr>
-<tr><td>LocalStack plumbing</td><td>headless Service + manual Endpoints at pinned podman IP 10.89.1.10</td><td>real AWS (no endpoint override) or a proper Service with a selector</td></tr>
+<tr><td>LocalStack plumbing</td><td>headless Service + manual Endpoints at a runtime-discovered podman IP</td><td>real AWS (no endpoint override) or a proper Service with a selector</td></tr>
 <tr><td>Provider-config flags</td><td>skip_credentials_validation, skip_region_validation, skip_metadata_api_check, skip_requesting_account_id, s3_use_path_style</td><td>remove all of them — real AWS validates each</td></tr>
 <tr><td>Transport</td><td>plain HTTP internally (LocalStack, Vault)</td><td>HTTPS end-to-end</td></tr>
 <tr><td>RBAC</td><td>broad cluster-scoped read-aws-family-config grant to a provider SA</td><td>scope tightly, audit, track the upstream issue; prefer namespaced grants</td></tr>
 <tr><td>Network</td><td>no NetworkPolicy</td><td>deny-by-default NetworkPolicy between namespaces</td></tr>
 <tr><td>Sizing / HA</td><td>no requests/limits, single replica, no PDB</td><td>sized resources, HA replicas, PodDisruptionBudgets, health checks</td></tr>
-<tr><td>Terraform state</td><td>single shared k8s Secret (tfstate-default)</td><td>per-Workspace isolation, encryption, remote backend (S3 + DynamoDB locking)</td></tr>
 <tr><td>Observability</td><td>none</td><td>metrics / dashboards / alerting for Crossplane and providers</td></tr>
 <tr><td>Delivery</td><td>local <code>helm upgrade</code></td><td>GitOps (ArgoCD / Flux), CI, drift detection, managed upgrades</td></tr>
 <tr><td>Node config</td><td>host inotify raised globally</td><td>size nodes so providers fit; node-level config, not a global sysctl crutch</td></tr>
-<tr><td>Behavioural noise</td><td>15s write loop; terraform reconcile cadence</td><td>back off to sane intervals</td></tr>
+<tr><td>Behavioural noise</td><td>15s write loop; ESO refresh cadence</td><td>back off to sane intervals</td></tr>
 </table>
 <p style="font-size:.9em;color:rgba(127,127,127,.9)">Marker for "PoC only": a
 hardcoded credential, a LocalStack-specific flag, a manual Endpoints, a broad

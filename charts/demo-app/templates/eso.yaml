@@ -1,0 +1,30 @@
+{{- $ns := .Values.namespace -}}
+# Producer-side Vault access. The composed PushSecret (resource #3 in the
+# Composition) needs a namespace-scoped SecretStore to push through; a
+# SecretStore cannot be referenced across namespaces, so the producer gets its
+# own here -- the mirror image of demo-app-2's store. Token is Vault dev-mode
+# root (PoC only).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vault-token
+  namespace: {{ $ns }}
+type: Opaque
+stringData:
+  token: root
+---
+apiVersion: external-secrets.io/v1
+kind: SecretStore
+metadata:
+  name: vault-backend
+  namespace: {{ $ns }}
+spec:
+  provider:
+    vault:
+      server: http://vault.rss.svc.cluster.local:8200
+      path: secret
+      version: v2
+      auth:
+        tokenSecretRef:
+          name: vault-token
+          key: token
