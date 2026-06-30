@@ -1,6 +1,19 @@
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 name: crossplane-poc
+# Point containerd's registry config at /etc/containerd/certs.d so the per-registry
+# hosts.toml files up.sh writes (skip_verify=true, for the corporate TLS-intercepting
+# proxy) are honoured. containerd v2 split the CRI plugin, moving registry config from
+# io.containerd.grpc.v1.cri to io.containerd.cri.v1.images; we set both so this works
+# on v1 and v2 nodes. config_path is read only at containerd startup, hence it must be
+# baked in here at cluster creation (the hosts.toml files themselves are read per-pull).
+containerdConfigPatches:
+  - |-
+    [plugins."io.containerd.cri.v1.images".registry]
+      config_path = "/etc/containerd/certs.d"
+  - |-
+    [plugins."io.containerd.grpc.v1.cri".registry]
+      config_path = "/etc/containerd/certs.d"
 nodes:
   - role: control-plane
 networking:

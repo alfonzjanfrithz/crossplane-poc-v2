@@ -34,10 +34,32 @@ echo "==> 2/10  kind cluster"
 kind get clusters 2>/dev/null | grep -q '^crossplane-poc$' || \
   kind create cluster --config "$ROOT/kind/config.yaml" --wait 60s
 
+# Corporate TLS interception: the proxy re-signs HTTPS with an internal CA that
+# the kind node's containerd does not trust, so image pulls fail with
+# "x509: certificate signed by unknown authority". Tell containerd to skip TLS
+# verification per registry. kind already sets config_path=/etc/containerd/certs.d,
+# and hosts.toml is read per-pull, so no containerd restart is needed.
+echo "      configuring containerd to skip TLS verify for image registries"
+NODE=crossplane-poc-control-plane
+for reg in xpkg.crossplane.io xpkg.upbound.io ghcr.io quay.io docker.io registry-1.docker.io; do
+  server="https://$reg"; [ "$reg" = "docker.io" ] && server="https://registry-1.docker.io"
+  podman exec "$NODE" mkdir -p "/etc/containerd/certs.d/$reg"
+  podman exec "$NODE" sh -c "cat > /etc/containerd/certs.d/$reg/hosts.toml <<EOF
+server = \"$server\"
+
+[host.\"$server\"]
+  capabilities = [\"pull\", \"resolve\"]
+  skip_verify = true
+EOF"
+done
+# Clear any pods stuck in ImagePullBackOff from an earlier TLS-failed run so they
+# re-pull immediately instead of waiting out the kubelet backoff (no-op if none).
+kubectl -n crossplane-system delete pods --all --ignore-not-found >/dev/null 2>&1 || true
+
 echo "==> 3/10  helm repos + platform charts"
-helm repo add crossplane-stable  https://charts.crossplane.io/stable/  >/dev/null
-helm repo add hashicorp          https://helm.releases.hashicorp.com   >/dev/null
-helm repo add external-secrets   https://charts.external-secrets.io    >/dev/null
+helm repo add crossplane-stable  https://charts.crossplane.io/stable/  --force-update >/dev/null
+helm repo add hashicorp          https://helm.releases.hashicorp.com   --force-update >/dev/null
+helm repo add external-secrets   https://charts.external-secrets.io    --force-update >/dev/null
 helm repo update >/dev/null
 helm upgrade --install crossplane crossplane-stable/crossplane \
   -n crossplane-system --create-namespace --wait >/dev/null
