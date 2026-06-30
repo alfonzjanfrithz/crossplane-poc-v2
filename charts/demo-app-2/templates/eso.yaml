@@ -1,7 +1,8 @@
 {{- $ns := .Values.namespace -}}
 # Vault access for this namespace. SecretStore is namespace-scoped, so the
 # consumer needs its own token + SecretStore in demo-app-2 (it cannot reference
-# demo-app's store). It reads the value demo-app's PushSecret wrote to Vault.
+# demo-app's store). It reads the value the producer's composed terraform
+# Workspace wrote to Vault.
 apiVersion: v1
 kind: Secret
 metadata:
@@ -27,9 +28,9 @@ spec:
           name: vault-token
           key: token
 ---
-# Pull direction (Vault -> Kubernetes Secret). This is the inverse of demo-app's
-# PushSecret (Kubernetes Secret -> Vault). Together they close the loop:
-# Crossplane -> Secret (demo-app) -> Vault -> Secret (demo-app-2) -> consumer.
+# Pull direction (Vault -> Kubernetes Secret). This is the inverse of the
+# producer's composed Workspace write (Crossplane -> Vault). Together they close
+# the loop: Crossplane -> Workspace -> Vault -> Secret (demo-app-2) -> consumer.
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:

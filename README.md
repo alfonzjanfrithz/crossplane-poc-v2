@@ -4,12 +4,13 @@ A from-scratch, fully **v2-native** Crossplane proof of concept on a local
 `kind` + `podman` cluster against LocalStack + Vault. A producer application
 creates a **namespaced composite resource** (`XBucket`); Crossplane composes an
 S3 bucket (via the **v2 native per-service AWS provider**), materialises the
-dynamic bucket name into a Secret, and mirrors it into Vault through **two
-independent paths** (External Secrets `PushSecret` and a Crossplane-native
-terraform `Workspace`). A **second application in a separate namespace** then
-reads that value *back out of Vault* via an ESO `ExternalSecret` and accesses
-the same shared bucket — proving cross-namespace resource + secret sharing with
-Vault as the substrate.
+dynamic bucket name into a Secret, and — **inside the same composition** — runs a
+terraform `Workspace` that publishes that name to Vault. Putting the Vault write
+*in the composite* makes it **lifecycle-coupled**: when the XR is deleted,
+`terraform destroy` removes the Vault entry, so no secret outlives its resource.
+A **second application in a separate namespace** then reads that value *back out
+of Vault* via an ESO `ExternalSecret` and accesses the same shared bucket —
+proving cross-namespace resource + secret sharing with Vault as the substrate.
 
 The whole stack comes up with one command: `./scripts/up.sh`.
 
@@ -40,8 +41,10 @@ for namespaced managed resources. There are **no claims anywhere** in this PoC.
 - **Producer creates a namespaced `XBucket`** XR; Crossplane composes a real S3
   bucket in LocalStack (via the v2 native per-service AWS provider), a native
   Secret carrying the dynamic bucket name, and a terraform `Workspace`.
-- **Dynamic value → Vault, two independent ways**: an ESO `PushSecret` (operator
-  path) and the terraform `Workspace` (Crossplane-native path).
+- **Dynamic value → Vault, in-composite**: the composed `Workspace` writes the
+  bucket name to Vault at a **stable, consumer-knowable** path
+  (`crossplane/<xr-name>-bucket`). It is lifecycle-coupled — the entry is deleted
+  with the bucket.
 - **Consumer pulls it back** from Vault via an ESO `ExternalSecret` in a separate
   namespace, then reads the same shared bucket.
 - **Vault is the sharing substrate** — there is no direct cross-namespace Secret
@@ -59,7 +62,7 @@ flowchart TD
     XR["XBucket demo-app<br/>platform.acme.io"]
     BKT["Bucket s3.aws.m.upbound.io<br/>poc-demo-demo-app-uid"]
     SEC["Secret demo-app-bucket<br/>bucketName dynamic"]
-    WS["Workspace tf.m.upbound.io<br/>terraform vault provider"]
+    WS["Workspace tf.m.upbound.io<br/>writes Vault stable key"]
   end
   subgraph NS2["namespace demo-app-2 consumer"]
     ES["ExternalSecret shared-bucket<br/>pulls from Vault"]
@@ -69,7 +72,7 @@ flowchart TD
   XR -->|"composition"| BKT
   XR -->|"composition"| SEC
   XR -->|"composition"| WS
-  APP -->|"env from"| SEC
+  SEC -.->|"read by producer"| APP
   subgraph LS["LocalStack podman"]
     S3["S3 poc-demo-demo-app-uid shared"]
   end
@@ -79,8 +82,7 @@ flowchart TD
   subgraph RSS["namespace rss"]
     VAULT["Vault dev"]
   end
-  SEC -->|"PushSecret push"| VAULT
-  WS -->|"terraform apply"| VAULT
+  WS -->|"terraform apply lifecycle-coupled"| VAULT
   VAULT -->|"ExternalSecret pull"| ES
   ES -->|"creates"| SEC2
   APP2 -->|"env from"| SEC2
@@ -99,14 +101,15 @@ flowchart TD
      hashicorp/vault provider to write the bucket name into Vault.
 3. The producer app consumes `demo-app-bucket` via `env.valueFrom.secretKeyRef`
    and writes objects to the bucket every 15 s.
-4. The dynamic value reaches Vault two independent ways:
-   - **ESO `PushSecret`** reads the composed Secret and writes
-     `secret/crossplane/demo-app-bucket`.
-   - The **terraform `Workspace`** writes
-     `secret/crossplane-native/<bucket-name>`.
+4. The composed **terraform `Workspace`** writes the bucket name into Vault at a
+   **stable, consumer-knowable** key: `secret/crossplane/demo-app-bucket`. The
+   key is derived from the XR's name (`crossplane/<xr-name>-bucket`), so a
+   consumer that knows the producer's XR name knows where to look. Because the
+   Workspace is a composed resource, `terraform destroy` runs when the XR is
+   deleted — the Vault entry dies with the bucket.
 5. **Cross-namespace sharing (the new proof).** A second app in `demo-app-2`
    never touches the `demo-app` namespace. It uses an ESO **`ExternalSecret`**
-   (the inverse of `PushSecret`: Vault → Kubernetes Secret) with its own
+   (the inverse of the Workspace write: Vault → Kubernetes Secret) with its own
    namespace-local `SecretStore` to pull `secret/crossplane/demo-app-bucket` into
    a local Secret `shared-bucket`. The consumer pod (`secretKeyRef` on
    `shared-bucket`) cannot start until that Secret exists — so its readiness
@@ -119,24 +122,23 @@ random and stable, so the name has a genuine random component while still being
 knowable to the composition at render time (no fragile read-back of a
 `generateName`'d resource).
 
-Note on the two Vault paths from the consumer's perspective: the ESO path uses a
-**stable key** (`crossplane/demo-app-bucket`) that a consumer can know in
-advance — that is why the consumer reads it. The terraform-native path keys on
-the **dynamic** bucket name, so it is a producer-side record rather than a
-consumer-facing handle.
+Note on the key shape: the **value** in Vault is the dynamic bucket name
+(`<prefix><xr-name><uid>`), but the **key** (`crossplane/<xr-name>-bucket`) is
+stable and consumer-knowable. So a consumer learns a random, unknowable bucket
+name at runtime from a path it could predict in advance.
 
 ---
 
 ## Seams: the linkage snippets
 
-The whole system is just five wiring points. These are the minimal snippets at
+The whole system is just four wiring points. These are the minimal snippets at
 each seam, in data-flow order, so the architecture is legible without opening
 the files.
 
-**Seam 1 — one expression computes the name and threads it everywhere**
+**Seam 1 — one expression computes the dynamic name and threads it everywhere**
 (`crossplane/composition.yaml`). The same `CombineFromComposite` value
 (`<prefix><XR-name>-<XR-uid>`) is stamped into the Bucket's external name **and**
-the Secret's `bucketName` **and** the terraform var (Seam 2):
+the Secret's `bucketName` **and** the terraform `bucket_name` var (Seam 2):
 
 ```yaml
 - type: CombineFromComposite
@@ -151,40 +153,33 @@ the Secret's `bucketName` **and** the terraform var (Seam 2):
   toFieldPath: metadata.annotations[crossplane.io/external-name]
 ```
 
-**Seam 2 — composed Secret → Vault, native Crossplane**
+**Seam 2 — composed Workspace → Vault, native Crossplane (lifecycle-coupled)**
 (`crossplane/composition.yaml`, the `vault-secret` Workspace). A
 `provider-terraform` Workspace runs `terraform apply` with the hashicorp/vault
-provider; `var.bucket_name` is patched from Seam 1. Crossplane reconciles this
-itself — no external operator:
+provider. Two vars are patched from the XR: `bucket_name` (dynamic, from Seam 1)
+becomes the **value**, and `xr_name` (the stable XR `metadata.name`) builds the
+**key**. Crossplane reconciles this itself — no external operator — and
+`terraform destroy` removes the entry when the XR is deleted:
+
+```yaml
+- type: FromCompositeFieldPath
+  fromFieldPath: metadata.name              # XR name -> stable Vault key
+  toFieldPath: spec.forProvider.vars[1].value   # xr_name
+```
 
 ```hcl
 resource "vault_kv_secret_v2" "bucket" {
   mount     = "secret"
-  name      = "crossplane-native/${var.bucket_name}"   # keyed on the dynamic name
-  data_json = jsonencode({ bucketName = var.bucket_name })
+  name      = "crossplane/${var.xr_name}-bucket"        # stable, consumer-knowable key
+  data_json = jsonencode({ bucketName = var.bucket_name })  # dynamic value
 }
 ```
 
-**Seam 3 — composed Secret → Vault, ESO operator** (`eso/pushsecret.yaml`).
-The independent "suspenders" path: External Secrets reads the composed Secret
-and pushes it to Vault under a **stable key** a consumer can know in advance:
-
-```yaml
-selector:
-  secret:
-    name: demo-app-bucket                     # the composed Secret
-data:
-  - match:
-      secretKey: bucketName
-      remoteRef:
-        remoteKey: crossplane/demo-app-bucket # stable key
-        property: bucketName
-```
-
-**Seam 4 — Vault → consumer Secret, ESO pull** (`charts/demo-app-2/templates/eso.yaml`).
-The inverse of Seam 3, in a different namespace: an `ExternalSecret` reads the
-stable key back out of Vault and materialises a local Secret. This closes the
-loop cross-namespace — `demo-app-2` never touches `demo-app`:
+**Seam 3 — Vault → consumer Secret, ESO pull** (`charts/demo-app-2/templates/eso.yaml`).
+The inverse of the Workspace write (Seam 2), in a different namespace: an
+`ExternalSecret` reads the stable key back out of Vault and materialises a local
+Secret. This closes the loop cross-namespace — `demo-app-2` never touches
+`demo-app`:
 
 ```yaml
 target:
@@ -193,13 +188,13 @@ target:
 data:
   - secretKey: bucketName
     remoteRef:
-      key: crossplane/demo-app-bucket         # the stable key Seam 3 wrote
+      key: crossplane/demo-app-bucket         # the stable key Seam 2 wrote
       property: bucketName
 ```
 
-**Seam 5 — consumer consumes the local Secret → shared bucket**
+**Seam 4 — consumer consumes the local Secret → shared bucket**
 (`charts/demo-app-2/templates/deployment.yaml`). The pod cannot start until the
-`shared-bucket` Secret exists (Seam 4), so its readiness self-proves the chain:
+`shared-bucket` Secret exists (Seam 3), so its readiness self-proves the chain:
 
 ```yaml
 env:
@@ -210,11 +205,11 @@ env:
         key: bucketName
 ```
 
-**The throughline:** Seam 1 is the single thread — one `prefix+name+uid`
-expression is stamped into the Bucket, the Secret, and the terraform var. Seams
-2 and 3 are the deliberately redundant push into Vault (Crossplane-native vs
-operator). Seam 4 is the pull that closes the loop in another namespace, and
-Seam 5 is the app actually using it.
+**The throughline:** Seam 1 threads the dynamic name into the Bucket, the Secret,
+and the terraform value. Seam 2 is the single in-composite Vault write —
+lifecycle-coupled, so the secret dies with the bucket — using the XR's stable
+name as the key. Seam 3 is the pull that closes the loop in another namespace,
+and Seam 4 is the app actually using it.
 
 ---
 
@@ -228,12 +223,13 @@ Seam 5 is the app actually using it.
 - **`provider-aws-s3:v2.0.0`** — per-service v2 provider; auto-resolves its
   `provider-family-aws` dependency. Registers namespaced `s3.aws.m.upbound.io`.
 - **`provider-terraform:v1.1.1`** — namespaced `tf.m.upbound.io` Workspace, used
-  for the Crossplane-native Vault write (substitutes for the archived
+  for the in-composite Vault write (substitutes for the archived
   `provider-vault`). State is persisted via a terraform `kubernetes` backend.
 - **Vault** (hashicorp helm, dev mode, root token `root`) in namespace `rss`.
-- **External Secrets** — `PushSecret` + `SecretStore` in `demo-app` (producer
-  side, Kubernetes → Vault), and an `ExternalSecret` + its own `SecretStore` in
-  `demo-app-2` (consumer side, Vault → Kubernetes).
+- **External Secrets** — used only on the **consumer** side: an `ExternalSecret`
+  + its own namespace-local `SecretStore` in `demo-app-2` (Vault → Kubernetes).
+  The producer side needs no ESO — Crossplane's composed `Workspace` writes Vault
+  directly.
 
 ---
 
@@ -359,7 +355,6 @@ crossplane-poc-v2/
     composition.yaml                     Bucket + Secret + Vault Workspace
   charts/demo-app/                       producer: XBucket + ConfigMap + Deployment
   charts/demo-app-2/                     consumer: ExternalSecret + Deployment (reads from Vault)
-  eso/pushsecret.yaml                    producer side: vault-token + SecretStore + PushSecret
   scripts/up.sh, down.sh                 bootstrap / teardown
 ```
 
@@ -374,7 +369,7 @@ map; this is the detail.)
 
 | File | Role | What's inside that matters |
 |------|------|----------------------------|
-| `scripts/up.sh` | Idempotent 9-step bootstrap | Ordering is load-bearing: LocalStack → kind → helm charts → function → **runtime config before providers** → wait for the stable SA → **RBAC** → wait healthy → ProviderConfigs → XRD/Composition → demo app → ESO. Step 0 has an **inotify preflight** that warns if `fs.inotify.max_user_instances < 512`. |
+| `scripts/up.sh` | Idempotent 10-step bootstrap | Ordering is load-bearing: LocalStack → kind → helm charts → function → **runtime config before providers** → wait for the stable SA → **RBAC** → wait healthy → ProviderConfigs → XRD/Composition → demo app → (composed Workspace writes Vault) → demo-app-2 consumer. Step 0 has an **inotify preflight** that warns if `fs.inotify.max_user_instances < 512`. |
 | `scripts/down.sh` | Teardown | `kind delete cluster` + `podman rm -f localstack`; `--purge` also removes the `kindest/node` image. |
 | `kind/config.yaml` | kind cluster (podman) | Single control-plane node; relies on `KIND_EXPERIMENTAL_PROVIDER=podman`. Never add `extraMounts: /var/run` (it collides with the `/var/run → /run` symlink). |
 
@@ -396,7 +391,7 @@ map; this is the detail.)
 | File | Role | What's inside that matters |
 |------|------|----------------------------|
 | `crossplane/xrd.yaml` | `XBucket` XRD | `apiVersion: apiextensions.crossplane.io/v2`, `scope: Namespaced`, and **no `claimNames`** (v2 drops claims). One input field, `spec.bucketPrefix` (default `poc-bucket-`). |
-| `crossplane/composition.yaml` | The composition | Pipeline mode → `function-patch-and-transform`. Renders three composed resources that all land in the XR's namespace automatically: `Bucket` (`s3.aws.m.upbound.io`), a native `Secret` (the v2 replacement for connection secrets), and a `Workspace` (`tf.m.upbound.io`) for the native Vault write. Bucket name is deterministic — `CombineFromComposite` of `prefix + XR name + XR uid` — set as the `external-name` annotation. |
+| `crossplane/composition.yaml` | The composition | Pipeline mode → `function-patch-and-transform`. Renders three composed resources that all land in the XR's namespace automatically: `Bucket` (`s3.aws.m.upbound.io`), a native `Secret` (the v2 replacement for connection secrets), and a `Workspace` (`tf.m.upbound.io`) for the **in-composite, lifecycle-coupled** Vault write (`terraform destroy` on XR deletion removes the Vault entry). Bucket name is deterministic — `CombineFromComposite` of `prefix + XR name + XR uid` — set as the `external-name` annotation. The Workspace writes Vault key `crossplane/<xr-name>-bucket` (value = dynamic bucket name); `xr_name` is patched from the XR `metadata.name`. |
 
 ### Demo app (Helm chart) — producer
 
@@ -412,16 +407,10 @@ map; this is the detail.)
 
 | File | Role | What's inside that matters |
 |------|------|----------------------------|
-| `charts/demo-app-2/templates/eso.yaml` | Pull value from Vault | Three objects in `demo-app-2`: its own `vault-token` + namespace-scoped `SecretStore` (SecretStore cannot be shared across namespaces), and an **`ExternalSecret`** — the inverse of `PushSecret` — materialising `secret/crossplane/demo-app-bucket` into a local Secret `shared-bucket` (`refreshInterval: 10s`). |
+| `charts/demo-app-2/templates/eso.yaml` | Pull value from Vault | Three objects in `demo-app-2`: its own `vault-token` + namespace-scoped `SecretStore` (SecretStore cannot be shared across namespaces), and an **`ExternalSecret`** — the inverse of the composed Workspace write — materialising `secret/crossplane/demo-app-bucket` into a local Secret `shared-bucket` (`refreshInterval: 10s`). |
 | `charts/demo-app-2/templates/deployment.yaml` | The consumer app | `secretKeyRef` on `shared-bucket`. The pod will **not start until that Secret exists** — i.e. until the ExternalSecret has pulled the value from Vault — so pod readiness self-proves the whole chain. Lists objects the producer is writing to the shared LocalStack bucket. |
-| `charts/demo-app-2/values.yaml` | Config knobs | `name`/`namespace` (`demo-app-2`), `vaultPath` (`crossplane/demo-app-bucket` — the stable key the producer's PushSecret writes), `image`, `pollSeconds`. |
+| `charts/demo-app-2/values.yaml` | Config knobs | `name`/`namespace` (`demo-app-2`), `vaultPath` (`crossplane/demo-app-bucket` — the stable key the composed Workspace writes), `image`, `pollSeconds`. |
 | `charts/demo-app-2/Chart.yaml` | Chart metadata | Separate chart because the consumer does something different (reads from Vault; creates no XR). |
-
-### External Secrets (producer side — Vault path A, push)
-
-| File | Role | What's inside that matters |
-|------|------|----------------------------|
-| `eso/pushsecret.yaml` | ESO push to Vault (the "suspenders") | Three objects in `demo-app`: `vault-token` Secret (`root`), a `SecretStore` pointing cross-namespace at `vault.rss.svc:8200`, and a `PushSecret` mirroring `demo-app-bucket` → Vault KV at `secret/crossplane/demo-app-bucket`. `refreshInterval: 10s`. (The terraform `Workspace` in the composition is the independent "belt".) |
 
 ---
 
@@ -430,7 +419,7 @@ map; this is the detail.)
 ```
 ./scripts/up.sh        # LocalStack -> kind -> Crossplane -> providers ->
                        # ProviderConfigs -> XRD/Composition -> demo-app ->
-                       # ESO push -> demo-app-2 consumer (pull from Vault)
+                       # composed Workspace writes Vault -> demo-app-2 consumer (pull from Vault)
 ./scripts/down.sh      # delete cluster + stop LocalStack
 ```
 
@@ -440,15 +429,17 @@ map; this is the detail.)
 - `kubectl -n demo-app logs deploy/demo-app` — producer writing objects every ~15 s.
 - `podman exec localstack awslocal s3api list-buckets` — the dynamic bucket exists.
 - `kubectl -n rss exec vault-0 -- vault kv get secret/crossplane/demo-app-bucket`
-  — **ESO** path in Vault.
-- `kubectl -n rss exec vault-0 -- vault kv list secret/crossplane-native` —
-  **Crossplane-native** (terraform) path.
+  — the bucket name in Vault, written by the composed Workspace.
 - `kubectl -n demo-app-2 get externalsecret shared-bucket` — consumer
   `Synced=True` (it pulled the value from Vault).
 - `kubectl -n demo-app-2 logs deploy/demo-app-2` — consumer shows the **same**
   dynamic bucket name (obtained via Vault, not from `demo-app`) and lists the
   producer's objects in the shared bucket. This is the cross-namespace sharing
   proof.
+- **Lifecycle coupling proof:** `kubectl -n demo-app delete xbucket demo-app &&
+  kubectl -n rss exec vault-0 -- vault kv get secret/crossplane/demo-app-bucket`
+  — deleting the XR runs `terraform destroy`, which removes the Vault entry (the
+  second command then fails with "no value"). Re-run `up.sh` to restore.
 
 ---
 
@@ -459,9 +450,11 @@ map; this is the detail.)
   bump + the family-config RBAC grant.
 - **Deterministic naming** (`prefix+xrname+uid`) avoids the SSA/read-back
   fragility of `generateName` while keeping a real random component.
-- **Two Vault paths** are deliberately redundant ("belt and suspenders"): ESO
-  is the generic operator path; the terraform `Workspace` proves Crossplane
-  itself can drive secrets into Vault without an external operator.
+- **In-composite Vault write, lifecycle-coupled.** The terraform `Workspace` is a
+  composed resource, so the Vault entry is created and deleted with the bucket —
+  no orphaned secrets. The trade-off: swapping the broker later (e.g. to AWS
+  Secrets Manager) means editing the composition's terraform provider+resource
+  (one place). The consumer side stays on ESO, which is broker-agnostic.
 - Vault runs in **dev mode** with `root` token — a real deployment would use
   scoped auth. State is in-memory; restarting Vault loses data (intentional for
   a local PoC).
@@ -476,7 +469,7 @@ demonstration but **must not** ship to production.
 | Area | PoC shortcut (NOT for prod) | Production requirement |
 |------|-----------------------------|------------------------|
 | Vault | dev mode, literal `root` token, in-memory, HTTP | real auth (Kubernetes / PKI), persistent raft storage, TLS |
-| Cloud credentials | `test`/`test` + `token: root` **hardcoded in manifests** (terraform module + `vault-token` Secret) | IRSA / WebIdentity / PodIdentity for AWS; Vault token from a real auth method; never committed to git |
+| Cloud credentials | `test`/`test` + `token: root` **hardcoded in manifests** (terraform module + consumer `vault-token` Secret) | IRSA / WebIdentity / PodIdentity for AWS; Vault token from a real auth method; never committed to git |
 | Secret material | plaintext composed Secret (`bucketName`) | encryption at rest + rotation; sensitive outputs via a real secret store |
 | LocalStack plumbing | headless in-cluster `Service` + manual `Endpoints` at a pinned podman IP (`10.89.1.10`) | real AWS (drop the endpoint override entirely) or a proper `Service` with a selector |
 | Provider-config flags | `skip_credentials_validation`, `skip_region_validation`, `skip_metadata_api_check`, `skip_requesting_account_id`, `s3_use_path_style` | remove all of them — real AWS validates each |
@@ -488,7 +481,7 @@ demonstration but **must not** ship to production.
 | Observability | none | metrics / dashboards / alerting for Crossplane and every provider |
 | Delivery | local `helm upgrade` | GitOps (ArggoCD / Flux), CI, drift detection, managed upgrade path |
 | Node config | host `inotify` raised globally | size nodes so providers fit; treat it as node-level config, not a global sysctl crutch |
-| Behavioural noise | 10 s PushSecret `refreshInterval` + 15 s app write loop | back off to sane intervals |
+| Behavioural noise | 15 s app write loop; terraform reconcile cadence | back off to sane intervals |
 
 The marker for "PoC only": a hardcoded credential, a LocalStack-specific flag,
 a manual `Endpoints`, a broad cluster RBAC grant, or a single-replica /

@@ -82,21 +82,18 @@ helm upgrade --install demo-app "$ROOT/charts/demo-app" -n demo-app --create-nam
 echo "      waiting for XBucket demo-app to become Ready..."
 kubectl -n demo-app wait xbucket/demo-app --for=condition=Ready --timeout=300s >/dev/null
 
-echo "==> 9/10  Vault sync (ESO SecretStore + PushSecret in demo-app)"
-kubectl apply -f "$ROOT/eso/pushsecret.yaml" >/dev/null
-
-echo "==> 10/10 demo-app-2 consumer (reads shared bucket from Vault via ExternalSecret)"
-# Guard: the consumer's pod will not start until its ExternalSecret has pulled
-# the value from Vault, so first make sure demo-app's PushSecret has landed it.
-echo "       waiting for demo-app-bucket value to reach Vault..."
+echo "==> 9/10  Vault sync: composed terraform Workspace writes crossplane/demo-app-bucket"
+echo "       waiting for the composed Workspace to land the value in Vault..."
 for i in $(seq 1 30); do
   v=$(kubectl -n rss exec vault-0 -- vault kv get -field=bucketName secret/crossplane/demo-app-bucket 2>/dev/null || true)
   [ -n "$v" ] && break
   sleep 2
 done
+
+echo "==> 10/10 demo-app-2 consumer (reads shared bucket from Vault via ExternalSecret)"
 helm upgrade --install demo-app-2 "$ROOT/charts/demo-app-2" -n demo-app-2 --create-namespace >/dev/null
 # Pod readiness transitively proves: ExternalSecret synced <- Vault had value <-
-# PushSecret <- demo-app composed Secret <- Crossplane bucket.
+# composed Workspace <- Crossplane bucket.
 kubectl -n demo-app-2 wait deploy/demo-app-2 --for=condition=Available --timeout=180s >/dev/null
 
 echo

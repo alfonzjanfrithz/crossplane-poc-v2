@@ -80,12 +80,15 @@ spec:
             # Native Kubernetes objects expose no Ready condition; existence = ready.
             readinessChecks:
               - type: None
-          # 3. Crossplane-native Vault sync (the "belt"). A provider-terraform
-          #    Workspace runs terraform apply with the hashicorp/vault provider
-          #    to write the dynamic bucket name into Vault KV. This is the
-          #    v2 namespaced Workspace (tf.m.upbound.io), the substitute for the
-          #    archived provider-vault. The kubernetes state backend is injected
-          #    by the terraform-default ClusterProviderConfig.
+          # 3. Vault sync, in-composite and lifecycle-coupled. A provider-terraform
+          #    Workspace runs terraform apply with the hashicorp/vault provider to
+          #    publish the bucket name into Vault KV at a STABLE, consumer-knowable
+          #    path (crossplane/<xr-name>-bucket). Because the Workspace is a
+          #    composed resource, terraform destroy runs when the XR is deleted, so
+          #    the Vault entry dies with the bucket -- no orphaned secrets. This is
+          #    the v2 namespaced Workspace (tf.m.upbound.io), the substitute for the
+          #    archived provider-vault. The kubernetes state backend is injected by
+          #    the terraform-default ClusterProviderConfig.
           - name: vault-secret
             base:
               apiVersion: tf.m.upbound.io/v1beta1
@@ -107,6 +110,7 @@ spec:
                       sensitive = true
                     }
                     variable "bucket_name"   { type = string }
+                    variable "xr_name"        { type = string }
 
                     provider "vault" {
                       address = var.vault_addr
@@ -115,11 +119,13 @@ spec:
 
                     resource "vault_kv_secret_v2" "bucket" {
                       mount     = "secret"
-                      name      = "crossplane-native/${var.bucket_name}"
+                      name      = "crossplane/${var.xr_name}-bucket"
                       data_json = jsonencode({ bucketName = var.bucket_name })
                     }
                   vars:
                     - key: bucket_name
+                      value: placeholder
+                    - key: xr_name
                       value: placeholder
                     - key: vault_addr
                       value: http://vault.rss.svc.cluster.local:8200
@@ -129,6 +135,7 @@ spec:
                   kind: ClusterProviderConfig
                   name: terraform-default
             patches:
+              # bucket_name (dynamic <prefix><xr-name><uid>) -> vars[0]
               - type: CombineFromComposite
                 combine:
                   strategy: string
@@ -139,3 +146,8 @@ spec:
                   string:
                     fmt: "%s%s-%s"
                 toFieldPath: spec.forProvider.vars[0].value
+              # xr_name (stable XR metadata.name) -> vars[1], used to build the
+              # consumer-knowable Vault path crossplane/<xr-name>-bucket.
+              - type: FromCompositeFieldPath
+                fromFieldPath: metadata.name
+                toFieldPath: spec.forProvider.vars[1].value

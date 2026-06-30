@@ -6,9 +6,10 @@ Guide for AI agents working in this repo. Read this first.
 
 A **Crossplane v2** proof of concept. A namespaced composite resource (`XBucket`)
 is composed into a real S3 bucket (in LocalStack) via the **v2 native per-service
-AWS provider**, plus a native Secret and a terraform `Workspace`. The dynamic
-bucket name round-trips through **Vault** (two independent push paths) to a
-**consumer app in a separate namespace**, which reads the shared bucket.
+AWS provider**, plus a native Secret and a terraform `Workspace`. That `Workspace`
+publishes the dynamic bucket name to **Vault** *from inside the composition*
+(lifecycle-coupled: deleting the XR runs `terraform destroy` and removes the Vault
+entry) so a **consumer app in a separate namespace** can read the shared bucket.
 
 **Fully v2-native**: namespaced XRs and MRs (`s3.aws.m.upbound.io`,
 `tf.m.upbound.io`), no claims, no native P&T, no connection details, no external
@@ -37,7 +38,7 @@ Full narrative + diagrams: `README.md` (markdown) and `index.html`
 
 `up.sh` is the source of truth. Step 0 = inotify preflight (aborts if too low).
 Full bootstrap takes several minutes (provider install/family auto-resolve,
-function pull, MR reconciliation, ESO sync, consumer wait).
+function pull, MR reconciliation, composed Workspace Vault write, consumer wait).
 
 For a **clean repeat**: `./scripts/down.sh && ./scripts/up.sh`.
 
@@ -52,10 +53,11 @@ checks value-in-Vault before installing the consumer, etc.).
   `s3.aws.m.upbound.io` Bucket + native Secret + `tf.m.upbound.io` Workspace.
 - Deterministic bucket name = `prefix + XR-name + XR-uid` via
   `CombineFromComposite`; set as external-name, Secret stringData, terraform var.
-- Value → Vault **two ways**: ESO `PushSecret` → `secret/crossplane/demo-app-bucket`
-  (stable key), and terraform `Workspace` → `secret/crossplane-native/<bucket>`
-  (dynamic key).
-- Consumer (`demo-app-2`) ESO `ExternalSecret` pulls the **stable** key from Vault
+- Value → Vault **in-composite**: the composed `Workspace` writes the bucket name
+  to `secret/crossplane/<xr-name>-bucket` (stable, consumer-knowable key;
+  `xr_name` is patched from the XR `metadata.name`). Lifecycle-coupled — the
+  entry is deleted with the bucket.
+- Consumer (`demo-app-2`) ESO `ExternalSecret` pulls that stable key from Vault
   → local `shared-bucket` Secret → lists producer's objects in the shared bucket.
 - Vault KV v2 at `secret/`; `vault.rss.svc.cluster.local:8200`; dev-mode root
   token `root`.
@@ -100,9 +102,11 @@ If something breaks, check these first.
     token + SecretStore in `demo-app-2`.
 14. **`function-patch-and-transform` v0.10.7**: `transform.string` needs
     `type: Format`; `combine.string` rejects `type`.
-15. **ESO kinds**: `ExternalSecret` = `external-secrets.io/v1`,
-    `PushSecret` = `v1alpha1`. `remoteRef` is top-level for `ExternalSecret`,
-    under `match` for `PushSecret`.
+15. **ESO is consumer-side only**: `ExternalSecret` (`external-secrets.io/v1`)
+    pulls Vault → local Secret in `demo-app-2`; `remoteRef` is top-level. The
+    producer side uses **no ESO** — Crossplane's composed `Workspace` writes Vault
+    directly. (A previous revision used a `PushSecret` (`v1alpha1`, `remoteRef`
+    under `match`); it was removed in favour of the in-composite write.)
 16. **Never** add `extraMounts: /var/run` to the kind config (collides with the
     `/var/run → /run` symlink).
 17. **HCL**: `variable` blocks must be multi-line; single-line
@@ -125,7 +129,6 @@ If something breaks, check these first.
 | `crossplane/function-patch-and-transform.yaml` | composition function |
 | `charts/demo-app/` | producer: XBucket XR + ConfigMap + Deployment |
 | `charts/demo-app-2/` | consumer: `eso.yaml` ExternalSecret + Deployment |
-| `eso/pushsecret.yaml` | producer ESO: vault-token + SecretStore + PushSecret |
 | `scripts/up.sh` | 10-step bootstrap |
 | `scripts/down.sh` | teardown |
 | `kind/config.yaml` | kind cluster config (podman) |
@@ -136,8 +139,11 @@ If something breaks, check these first.
 - **Everything v2-native.** Namespaced MR convention uses the `.m.` infix
   (`s3.aws.m.upbound.io`). `provider-aws-s3` registers both namespaced and
   legacy cluster-scoped CRDs (~48 total).
-- The **consumer reads the ESO stable key** (`crossplane/demo-app-bucket`), NOT
-  the dynamic-name native key — the stable key is consumer-knowable.
+- The **Vault write is in the composition** (the composed terraform `Workspace`),
+  not an external operator — so it is lifecycle-coupled (the entry dies with the
+  bucket). The **key** (`crossplane/<xr-name>-bucket`) is stable and
+  consumer-knowable; the **value** is the dynamic bucket name. The consumer reads
+  that stable key via ESO.
 - **Docs live in two places** and MUST stay in sync: `README.md` (markdown) and
   `index.html` (highlight.js github-dark + mermaid CDNs; code blocks tagged
   `language-yaml`/`language-hcl`/`language-bash`/`nohighlight`; HCL loaded via an
@@ -151,11 +157,13 @@ If something breaks, check these first.
 
 1. Producer pod is `Running` and writing objects to its bucket.
 2. The bucket + objects exist in LocalStack.
-3. Vault has both paths populated (`secret/crossplane/demo-app-bucket` and
-   `secret/crossplane-native/<bucket>`).
+3. Vault has the value at `secret/crossplane/demo-app-bucket` (written by the
+   composed `Workspace`).
 4. Consumer pod (`demo-app-2`) is `Running` and logs show it listing the
    producer's objects. The consumer **will not start** until its Secret exists,
    so a `Running` consumer self-proves the entire Vault round-trip.
+5. **Lifecycle coupling**: delete the XR (`kubectl -n demo-app delete xbucket
+   demo-app`) and the Vault entry is removed too (terraform destroy).
 
 ## Common tasks
 
@@ -171,6 +179,6 @@ If something breaks, check these first.
 
 - Lint/check: none configured (pure manifests). Validate YAML by eye or with
   `kubectl apply --dry-run=server` against the running cluster.
-- Status: `kubectl get managed,composite,externalsecrets,pushsecrets -A`.
+- Status: `kubectl get managed,composite,externalsecrets -A`.
 - Vault: `kubectl -n rss exec deploy/vault -- vault kv get secret/crossplane/demo-app-bucket`.
 - LocalStack: `curl http://10.89.1.10:4566/_localstack/health`.
