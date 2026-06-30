@@ -17,7 +17,7 @@ secret stores, no ControllerConfig.
 Runs on **kind + podman (rootless) + LocalStack** (LocalStack runs outside the
 cluster, on the podman `kind` bridge network at `10.89.1.10`).
 
-Full narrative + diagrams: `SUMMARY.md` (markdown) and `index.html`
+Full narrative + diagrams: `README.md` (markdown) and `index.html`
 (self-contained, mermaid + highlight.js CDNs).
 
 ## Prerequisites (host)
@@ -129,7 +129,7 @@ If something breaks, check these first.
 | `scripts/up.sh` | 10-step bootstrap |
 | `scripts/down.sh` | teardown |
 | `kind/config.yaml` | kind cluster config (podman) |
-| `SUMMARY.md` / `index.html` | full documentation (keep both in sync) |
+| `README.md` / `index.html` | full documentation (keep both in sync) |
 
 ## Conventions
 
@@ -138,7 +138,7 @@ If something breaks, check these first.
   legacy cluster-scoped CRDs (~48 total).
 - The **consumer reads the ESO stable key** (`crossplane/demo-app-bucket`), NOT
   the dynamic-name native key — the stable key is consumer-knowable.
-- **Docs live in two places** and MUST stay in sync: `SUMMARY.md` (markdown) and
+- **Docs live in two places** and MUST stay in sync: `README.md` (markdown) and
   `index.html` (highlight.js github-dark + mermaid CDNs; code blocks tagged
   `language-yaml`/`language-hcl`/`language-bash`/`nohighlight`; HCL loaded via an
   extra `languages/hcl.min.js`).
