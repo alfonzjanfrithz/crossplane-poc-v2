@@ -61,8 +61,28 @@ helm repo add crossplane-stable  https://charts.crossplane.io/stable/  --force-u
 helm repo add hashicorp          https://helm.releases.hashicorp.com   --force-update >/dev/null
 helm repo add external-secrets   https://charts.external-secrets.io    --force-update >/dev/null
 helm repo update >/dev/null
+
+# Crossplane's package manager fetches package descriptors over HTTPS from inside
+# the core pod (NOT via containerd, so the certs.d skip_verify above does not help
+# it). Behind a TLS-intercepting proxy that fails with "x509: certificate signed by
+# unknown authority". Crossplane has no skip-TLS flag, so feed it the host's trusted
+# CA bundle (which includes the proxy's CA) via registryCaBundleConfig. The bundle is
+# extracted from the macOS trust stores at runtime into an ephemeral ConfigMap; it is
+# never committed. On a machine without a proxy this is a harmless extra trust bundle.
+kubectl get namespace crossplane-system >/dev/null 2>&1 || kubectl create namespace crossplane-system >/dev/null
+CA_BUNDLE="$(mktemp)"
+security find-certificate -a -p /System/Library/Keychains/SystemRootCertificates.keychain >  "$CA_BUNDLE" 2>/dev/null || true
+security find-certificate -a -p /Library/Keychains/System.keychain                         >> "$CA_BUNDLE" 2>/dev/null || true
+# Use create (not apply): the bundle is too big for apply's last-applied-config
+# annotation (256KB cap); ConfigMap data allows ~1MB. Delete-first keeps it idempotent.
+kubectl -n crossplane-system delete configmap registry-ca --ignore-not-found >/dev/null
+kubectl -n crossplane-system create configmap registry-ca --from-file=ca-bundle.crt="$CA_BUNDLE" >/dev/null
+rm -f "$CA_BUNDLE"
+
 helm upgrade --install crossplane crossplane-stable/crossplane \
-  -n crossplane-system --create-namespace --wait >/dev/null
+  -n crossplane-system --create-namespace \
+  --set registryCaBundleConfig.name=registry-ca \
+  --set registryCaBundleConfig.key=ca-bundle.crt --wait >/dev/null
 helm upgrade --install vault hashicorp/vault -n rss --create-namespace \
   --set server.dev.enabled=true --set server.dev.devRootToken=root \
   --set injector.enabled=false --wait >/dev/null
@@ -82,6 +102,9 @@ echo "==> 6/10  providers (v2): runtime config -> provider-aws-s3 + provider-ter
 # DeploymentRuntimeConfig must exist before the provider reconciles so the
 # revision is created with the stable ServiceAccount (provider-aws-s3).
 kubectl apply -f "$ROOT/crossplane/provider-aws-s3-runtime.yaml" >/dev/null
+# provider-terraform runtime config mounts the registry-ca CA bundle and sets
+# SSL_CERT_FILE so `terraform init` can download providers through the proxy.
+kubectl apply -f "$ROOT/crossplane/provider-terraform-runtime.yaml" >/dev/null
 kubectl apply -f "$ROOT/crossplane/providers.yaml" >/dev/null
 
 # Wait for the stable SA to exist, then bind the family-config RBAC. The

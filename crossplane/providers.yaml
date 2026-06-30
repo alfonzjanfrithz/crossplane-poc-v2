@@ -18,3 +18,6 @@ spec:
   # Namespaced MRs under tf.m.upbound.io. Used for the Crossplane-native
   # Vault sync (terraform hashicorp/vault provider inside a Workspace).
   package: xpkg.upbound.io/crossplane-contrib/provider-terraform:v1.1.1
+  runtimeConfigRef:
+    name: provider-terraform-runtime
+    kind: DeploymentRuntimeConfig
