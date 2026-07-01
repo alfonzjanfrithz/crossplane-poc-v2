@@ -16,19 +16,19 @@ if [ "$INST" -lt 512 ]; then
   echo "         (persist: write both to /etc/sysctl.d/99-inotify.conf)"
 fi
 
-echo "==> 1/10  LocalStack (podman, kind network)"
-if ! podman ps --format '{{.Names}}' | grep -q '^localstack$'; then
-  podman rm -f localstack >/dev/null 2>&1 || true
+echo "==> 1/10  MiniStack (podman, kind network)"
+if ! podman ps --format '{{.Names}}' | grep -q '^ministack$'; then
+  podman rm -f ministack >/dev/null 2>&1 || true
   # No static --ip: let podman assign one from the kind network's subnet
   # (the subnet differs per machine). We read the assigned IP back below and
   # inject it into the manual Endpoints, so nothing is hardcoded.
-  podman run -d --name localstack --network kind \
-    -p 4566:4566 docker.io/localstack/localstack:4.3 >/dev/null
+  podman run -d --name ministack --network kind \
+    -p 4566:4566 docker.io/ministackorg/ministack:latest >/dev/null
 fi
-# Discover the IP podman gave LocalStack on the kind network (runs whether we
+# Discover the IP podman gave MiniStack on the kind network (runs whether we
 # just started it or it was already up). This value flows into step 4.
-LS_IP=$(podman inspect localstack -f '{{(index .NetworkSettings.Networks "kind").IPAddress}}')
-echo "      LocalStack IP on kind network: $LS_IP"
+MS_IP=$(podman inspect ministack -f '{{(index .NetworkSettings.Networks "kind").IPAddress}}')
+echo "      MiniStack IP on kind network: $MS_IP"
 
 echo "==> 2/10  kind cluster"
 kind get clusters 2>/dev/null | grep -q '^crossplane-poc$' || \
@@ -98,10 +98,10 @@ helm upgrade --install vault hashicorp/vault -n rss --create-namespace \
 helm upgrade --install external-secrets external-secrets/external-secrets \
   -n external-secrets --create-namespace --set installCRDs=true --wait >/dev/null
 
-echo "==> 4/10  LocalStack in-cluster Service (manual Endpoints)"
-# Inject the discovered LocalStack IP into the Endpoints placeholder at apply
+echo "==> 4/10  MiniStack in-cluster Service (manual Endpoints)"
+# Inject the discovered MiniStack IP into the Endpoints placeholder at apply
 # time, so the in-cluster DNS name routes to wherever podman put the container.
-sed "s/__LOCALSTACK_IP__/$LS_IP/" "$ROOT/crossplane/localstack-service.yaml" \
+sed "s/__MINISTACK_IP__/$MS_IP/" "$ROOT/crossplane/ministack-service.yaml" \
   | kubectl apply --server-side -f - >/dev/null
 
 echo "==> 5/10  Crossplane function"
@@ -190,10 +190,10 @@ echo "   value the composed PushSecret wrote (secret/crossplane/demo-app-bucket)
 kubectl -n rss exec vault-0 -- vault kv get secret/crossplane/demo-app-bucket 2>/dev/null || echo "     (not present yet)"
 
 echo
-echo "-- localstack-system  (in-cluster route to LocalStack) -----"
-kubectl -n localstack-system get svc,endpoints 2>/dev/null || true
-echo "   buckets in LocalStack:"
-podman exec localstack awslocal s3api list-buckets 2>/dev/null || true
+echo "-- ministack-system  (in-cluster route to MiniStack) -----"
+kubectl -n ministack-system get svc,endpoints 2>/dev/null || true
+echo "   buckets in MiniStack:"
+podman exec ministack awslocal s3api list-buckets 2>/dev/null || true
 
 echo
 echo "============================================================"
@@ -205,5 +205,5 @@ echo "  kubectl -n demo-app describe xbucket demo-app                           
 echo "  kubectl -n demo-app get pushsecret -o wide                                      # producer -> Vault (PushSecret), Ready=True"
 echo "  kubectl -n demo-app-2 get externalsecret,secret                                 # Vault -> local Secret (ExternalSecret)"
 echo "  kubectl -n rss exec vault-0 -- vault kv get secret/crossplane/demo-app-bucket   # the shared value in Vault"
-echo "  podman exec localstack awslocal s3api list-buckets                              # the shared bucket"
+echo "  podman exec ministack awslocal s3api list-buckets                              # the shared bucket"
 echo "  ./scripts/down.sh                                                               # teardown"

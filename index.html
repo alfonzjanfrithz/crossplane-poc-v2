@@ -26,7 +26,7 @@
 <body>
 <h1>Crossplane v2 PoC <span class="tag">fully v2-native</span></h1>
 <p>A from-scratch, fully <b>v2-native</b> Crossplane proof of concept on a local
-<code>kind</code> + <code>podman</code> cluster against LocalStack + Vault. A
+<code>kind</code> + <code>podman</code> cluster against MiniStack + Vault. A
 producer app creates a <b>namespaced composite resource</b>
 (<code>XBucket</code>); Crossplane composes an S3 bucket (via the <b>v2 native
 per-service AWS provider</b>), materialises the dynamic bucket name into a
@@ -42,11 +42,11 @@ Vault via an ESO <code>ExternalSecret</code> and accesses the same shared bucket
 <h2>Architecture</h2>
 <ul>
 <li><b>Three namespaces</b>: <code>demo-app</code> (producer), <code>demo-app-2</code> (consumer), <code>rss</code> (Vault).</li>
-<li><b>Producer creates a namespaced <code>XBucket</code></b> XR; Crossplane composes a real S3 bucket in LocalStack (via the v2 native per-service AWS provider), a native Secret carrying the dynamic bucket name, and an ESO <code>PushSecret</code>.</li>
+<li><b>Producer creates a namespaced <code>XBucket</code></b> XR; Crossplane composes a real S3 bucket in MiniStack (via the v2 native per-service AWS provider), a native Secret carrying the dynamic bucket name, and an ESO <code>PushSecret</code>.</li>
 <li><b>Dynamic value &rarr; Vault, in-composite</b>: the composed <code>PushSecret</code> writes the bucket name to Vault at a <b>stable, consumer-knowable</b> path (<code>crossplane/&lt;xr-name&gt;-bucket</code>). It is lifecycle-coupled &mdash; the entry is deleted with the bucket.</li>
 <li><b>Consumer pulls it back</b> from Vault via an ESO <code>ExternalSecret</code> in a separate namespace, then reads the same shared bucket.</li>
 <li><b>Vault is the sharing substrate</b> &mdash; no direct cross-namespace Secret access; the value round-trips through Vault.</li>
-<li><b>LocalStack</b> runs outside the cluster on podman, reached via an in-cluster headless <code>Service</code> + manual <code>Endpoints</code>.</li>
+<li><b>MiniStack</b> runs outside the cluster on podman, reached via an in-cluster headless <code>Service</code> + manual <code>Endpoints</code>.</li>
 <li><b>Fully v2-native</b>: namespaced XRs and MRs (<code>s3.aws.m.upbound.io</code>), no claims, composed resources inherit the XR's namespace.</li>
 </ul>
 <div class="mermaid">
@@ -67,7 +67,7 @@ flowchart TD
   XR -->|"composition"| SEC
   XR -->|"composition"| PS
   SEC -.->|"read by producer"| APP
-  subgraph LS["LocalStack podman"]
+  subgraph LS["MiniStack podman"]
     S3["S3 poc-demo-demo-app-uid shared"]
   end
   BKT -->|"create"| S3
@@ -202,7 +202,7 @@ stable <code>provider-aws-s3</code> ServiceAccount.
 required</b>. Without <code>source: Custom</code> the SDK uses AWS service
 metadata; without <code>services</code> the override applies to no service. In
 either case traffic silently goes to <b>real AWS</b> (403 InvalidAccessKeyId)
-and LocalStack logs show nothing.
+and MiniStack logs show nothing.
 </div>
 
 <div class="gotcha">
@@ -229,11 +229,25 @@ CRDs like ESO's <code>PushSecret</code> — composing one fails with
 family-config RBAC in gotcha #2).
 </div>
 
+<div class="gotcha">
+<b>9. MiniStack rejects the AWS SDK v2 default checksum (CRC64NVME)</b> —
+AWS CLI/SDK v2 (2024+) defaults to the <b>CRC64NVME</b> checksum on
+<code>PutObject</code>; MiniStack bundles only <b>SHA256/SHA1/CRC32</b> (no
+native CRC64NVME/CRC32C, to keep the image ~270 MB). So <code>aws s3 cp</code>
+from a pod fails with <code>InvalidRequest: Checksum algorithm not supported ...
+CRC64NVME</code> while the provider&rsquo;s <code>CreateBucket</code> (no object
+checksum) succeeds &rarr; the bucket is <b>Ready but the app logs
+<code>write FAILED</code></b>. Fix: <code>AWS_REQUEST_CHECKSUM_CALCULATION=
+when_required</code> (+ <code>AWS_RESPONSE_CHECKSUM_VALIDATION=when_required</code>)
+on any pod calling S3 &mdash; already wired into both demo Deployments. (LocalStack
+bundles CRC64NVME, so this is a new MiniStack-specific trap.)
+</div>
+
 <h2>Lessons learned: what cost rework</h2>
 <p>Honest retrospective — each row caused an apply-fail-retry loop or a debugging detour.</p>
 <table>
 <tr><th>#</th><th>Mistake</th><th>What happened</th><th>Hindsight (faster path)</th></tr>
-<tr><td>1</td><td>Debugged auth before checking where the request landed</td><td>~5 cycles on credentials (None &rarr; Environment, not in the enum &rarr; Secret) chasing InvalidAccessKeyId</td><td>Traffic was going to <b>real AWS, not LocalStack</b>. Ask "is the request reaching LocalStack?" first — one <code>podman logs localstack</code> during a reconcile. Tell: real-AWS-style RequestID/HostID + zero LocalStack logs.</td></tr>
+<tr><td>1</td><td>Debugged auth before checking where the request landed</td><td>~5 cycles on credentials (None &rarr; Environment, not in the enum &rarr; Secret) chasing InvalidAccessKeyId</td><td>Traffic was going to <b>real AWS, not MiniStack</b>. Ask "is the request reaching MiniStack?" first — one <code>podman logs ministack</code> during a reconcile. Tell: real-AWS-style RequestID/HostID + zero MiniStack logs.</td></tr>
 <tr><td>2</td><td>Re-extracted a schema, then ignored it</td><td>Had the <code>source</code> enum + <code>endpoint.services</code>, still wrote <code>source: Environment</code> and omitted <code>services</code></td><td>Act on the schema you just dumped; don't re-guess from memory.</td></tr>
 <tr><td>3</td><td>Didn't fix the known resource limit before installing</td><td>Gambled "lean" install would dodge the inotify exhaustion; it didn't (aws-s3 alone needs ~48). Also tried <code>sysctl</code> inside the node (denied under rootless podman)</td><td>Raise host <code>fs.inotify.max_user_instances</code> as a <b>precondition</b>, before installing any upjet provider.</td></tr>
 <tr><td>4</td><td>Iterated RBAC one permission at a time</td><td>read configs &rarr; then <code>create</code> on usages &rarr; then re-bind after SA changed</td><td>The upjet family gap is predictable: read-on-configs + CRUD-on-usages, bound to a stable SA. Write the full ClusterRole first try.</td></tr>
@@ -254,8 +268,8 @@ kubectl -n demo-app get pushsecret
 # producer writing objects to the dynamic bucket every ~15s
 kubectl -n demo-app logs deploy/demo-app
 
-# the shared bucket really exists in LocalStack
-podman exec localstack awslocal s3api list-buckets
+# the shared bucket really exists in MiniStack
+podman exec ministack awslocal s3api list-buckets
 
 # the bucket name in Vault, written by the composed PushSecret
 kubectl -n rss exec vault-0 -- vault kv get secret/crossplane/demo-app-bucket
@@ -274,9 +288,9 @@ kubectl -n demo-app-2 logs deploy/demo-app-2</code></pre>
     provider-aws-s3-runtime.yaml         DeploymentRuntimeConfig stable SA
     provider-aws-s3-rbac.yaml            family-config RBAC
     eso-pushsecret-rbac.yaml             lets Crossplane compose ESO PushSecrets
-    aws-creds-secret.yaml                LocalStack creds INI
-    provider-config.yaml                 ClusterProviderConfig AWS LocalStack
-    localstack-service.yaml              in-cluster Service manual Endpoints
+    aws-creds-secret.yaml                MiniStack creds INI
+    provider-config.yaml                 ClusterProviderConfig AWS MiniStack
+    ministack-service.yaml              in-cluster Service manual Endpoints
     xrd.yaml                             XBucket XRD v2 Namespaced no claims
     composition.yaml                     Bucket Secret Vault PushSecret
   charts/demo-app/                       producer Helm XBucket SecretStore ConfigMap Deployment
@@ -289,8 +303,8 @@ kubectl -n demo-app-2 logs deploy/demo-app-2</code></pre>
 <h3>Bootstrap &amp; cluster</h3>
 <table>
 <tr><th>File</th><th>Role</th><th>What's inside that matters</th></tr>
-<tr><td><code>scripts/up.sh</code></td><td>Idempotent 10-step bootstrap</td><td>Ordering is load-bearing: LocalStack &rarr; kind &rarr; helm &rarr; function &rarr; <b>runtime config before providers</b> &rarr; wait stable SA &rarr; <b>RBAC</b> &rarr; wait healthy &rarr; ProviderConfigs &rarr; XRD/Composition &rarr; demo-app &rarr; (composed PushSecret writes Vault) &rarr; <b>demo-app-2 consumer</b> (waits for the value to be in Vault first), then prints a <b>provisioned inventory</b> of everything created. Step 0 has an <b>inotify preflight</b> (warns if &lt; 512).</td></tr>
-<tr><td><code>scripts/down.sh</code></td><td>Teardown</td><td><code>kind delete cluster</code> + <code>podman rm localstack</code>; <code>--purge</code> also removes the kindest/node image.</td></tr>
+<tr><td><code>scripts/up.sh</code></td><td>Idempotent 10-step bootstrap</td><td>Ordering is load-bearing: MiniStack &rarr; kind &rarr; helm &rarr; function &rarr; <b>runtime config before providers</b> &rarr; wait stable SA &rarr; <b>RBAC</b> &rarr; wait healthy &rarr; ProviderConfigs &rarr; XRD/Composition &rarr; demo-app &rarr; (composed PushSecret writes Vault) &rarr; <b>demo-app-2 consumer</b> (waits for the value to be in Vault first), then prints a <b>provisioned inventory</b> of everything created. Step 0 has an <b>inotify preflight</b> (warns if &lt; 512).</td></tr>
+<tr><td><code>scripts/down.sh</code></td><td>Teardown</td><td><code>kind delete cluster</code> + <code>podman rm ministack</code>; <code>--purge</code> also removes the kindest/node image.</td></tr>
 <tr><td><code>kind/config.yaml</code></td><td>kind cluster (podman)</td><td>Single control-plane node; needs <code>KIND_EXPERIMENTAL_PROVIDER=podman</code>. Never add <code>extraMounts: /var/run</code> (collides with the /var/run &rarr; /run symlink).</td></tr>
 </table>
 
@@ -300,10 +314,10 @@ kubectl -n demo-app-2 logs deploy/demo-app-2</code></pre>
 <tr><td><code>crossplane/providers.yaml</code></td><td>Installs the v2 provider</td><td><code>provider-aws-s3:v2.0.0</code> (auto-resolves <code>provider-family-aws</code> &mdash; do <b>not</b> install family manually). It carries <code>runtimeConfigRef</code> &rarr; the stable-SA runtime config. No terraform provider &mdash; the Vault sync is a composed ESO PushSecret.</td></tr>
 <tr><td><code>crossplane/provider-aws-s3-runtime.yaml</code></td><td>DeploymentRuntimeConfig</td><td>Pins a <b>stable SA</b> <code>provider-aws-s3</code> via <code>serviceAccountTemplate</code> so the family-config RBAC binding survives revisions. Must set <code>selector</code> + matching template labels.</td></tr>
 <tr><td><code>crossplane/provider-aws-s3-rbac.yaml</code></td><td>Family-config RBAC (upjet gap fix)</td><td><code>ClusterRole read-aws-family-config</code>: read on clusterproviderconfigs/providerconfigs + full CRUD on providerconfigusages (all <code>aws.m.upbound.io</code>), bound to the stable SA.</td></tr>
-<tr><td><code>crossplane/provider-config.yaml</code></td><td>AWS ClusterProviderConfig (<code>localstack</code>)</td><td>Make-or-break bits: <code>endpoint.source: Custom</code> <b>and</b> <code>endpoint.services: [s3]</code> (both required or traffic goes to real AWS), static URL, <code>credentials.source: Secret</code>, plus all LocalStack helpers (skip_*, s3_use_path_style). See gotchas #4/#5.</td></tr>
-<tr><td><code>crossplane/aws-creds-secret.yaml</code></td><td>LocalStack credentials</td><td>INI body (<code>[default]</code> + test/test) consumed by provider-config.yaml.</td></tr>
+<tr><td><code>crossplane/provider-config.yaml</code></td><td>AWS ClusterProviderConfig (<code>ministack</code>)</td><td>Make-or-break bits: <code>endpoint.source: Custom</code> <b>and</b> <code>endpoint.services: [s3]</code> (both required or traffic goes to real AWS), static URL, <code>credentials.source: Secret</code>, plus all MiniStack helpers (skip_*, s3_use_path_style). See gotchas #4/#5.</td></tr>
+<tr><td><code>crossplane/aws-creds-secret.yaml</code></td><td>MiniStack credentials</td><td>INI body (<code>[default]</code> + test/test) consumed by provider-config.yaml.</td></tr>
 <tr><td><code>crossplane/eso-pushsecret-rbac.yaml</code></td><td>Lets Crossplane compose <code>PushSecret</code>s</td><td>Aggregated <code>ClusterRole</code> (<code>rbac.crossplane.io/aggregate-to-crossplane: true</code>) granting the composite controller CRUD on <code>pushsecrets.external-secrets.io</code> &mdash; without it, composing the Vault-sync PushSecret fails <code>forbidden</code> (see gotcha #8).</td></tr>
-<tr><td><code>crossplane/localstack-service.yaml</code></td><td>In-cluster route to LocalStack</td><td>Headless Service (no selector) + manual Endpoints at the podman IP up.sh discovers at runtime (placeholder <code>__LOCALSTACK_IP__</code>, nothing hardcoded) &rarr; DNS <code>localstack.localstack-system.svc:4566</code>.</td></tr>
+<tr><td><code>crossplane/ministack-service.yaml</code></td><td>In-cluster route to MiniStack</td><td>Headless Service (no selector) + manual Endpoints at the podman IP up.sh discovers at runtime (placeholder <code>__MINISTACK_IP__</code>, nothing hardcoded) &rarr; DNS <code>ministack.ministack-system.svc:4566</code>.</td></tr>
 <tr><td><code>crossplane/function-patch-and-transform.yaml</code></td><td>Composition function</td><td>v2 renders compositions via <b>functions</b> (native P&amp;T removed). Pinned v0.10.7.</td></tr>
 </table>
 
@@ -318,7 +332,7 @@ kubectl -n demo-app-2 logs deploy/demo-app-2</code></pre>
 <table>
 <tr><th>File</th><th>Role</th><th>What's inside that matters</th></tr>
 <tr><td><code>charts/demo-app/templates/xr.yaml</code></td><td>App creates the XR directly</td><td><code>kind: XBucket</code> in the release namespace with <code>spec.crossplane.compositionRef</code> (v2 path). <b>No claim.</b></td></tr>
-<tr><td><code>charts/demo-app/templates/deployment.yaml</code></td><td>The producer app</td><td>Reads <code>demo-app-bucket</code> via secretKeyRef &rarr; writes an object to LocalStack every <code>pollSeconds</code>.</td></tr>
+<tr><td><code>charts/demo-app/templates/deployment.yaml</code></td><td>The producer app</td><td>Reads <code>demo-app-bucket</code> via secretKeyRef &rarr; writes an object to MiniStack every <code>pollSeconds</code>.</td></tr>
 <tr><td><code>charts/demo-app/templates/configmap.yaml</code></td><td>App config template</td><td><code>${BUCKET_NAME}</code> substituted from the Secret at pod startup &mdash; how the app consumes what Crossplane created.</td></tr>
 <tr><td><code>charts/demo-app/templates/eso.yaml</code></td><td>Producer Vault <code>SecretStore</code></td><td>A namespace-local <code>vault-token</code> Secret + <code>SecretStore</code> in demo-app that the composed PushSecret pushes through (a SecretStore can't be shared across namespaces &mdash; the mirror of demo-app-2's).</td></tr>
 <tr><td><code>charts/demo-app/values.yaml</code></td><td>Config knobs</td><td><code>name</code>, <code>bucketPrefix</code> (poc-demo-), <code>namespace</code> (demo-app), image, pollSeconds.</td></tr>
@@ -339,9 +353,9 @@ kubectl -n demo-app-2 logs deploy/demo-app-2</code></pre>
 <tr><td>Vault</td><td>dev mode, literal <code>root</code> token, in-memory, HTTP</td><td>real auth (Kubernetes / PKI), persistent raft storage, TLS</td></tr>
 <tr><td>Cloud credentials</td><td><code>test</code>/<code>test</code> + <code>token: root</code> hardcoded in manifests (producer + consumer <code>vault-token</code> Secrets)</td><td>IRSA / WebIdentity / PodIdentity for AWS; Vault token from real auth; never in git</td></tr>
 <tr><td>Secret material</td><td>plaintext composed Secret (<code>bucketName</code>)</td><td>encryption at rest + rotation; sensitive outputs via a real secret store</td></tr>
-<tr><td>LocalStack plumbing</td><td>headless Service + manual Endpoints at a runtime-discovered podman IP</td><td>real AWS (no endpoint override) or a proper Service with a selector</td></tr>
+<tr><td>MiniStack plumbing</td><td>headless Service + manual Endpoints at a runtime-discovered podman IP</td><td>real AWS (no endpoint override) or a proper Service with a selector</td></tr>
 <tr><td>Provider-config flags</td><td>skip_credentials_validation, skip_region_validation, skip_metadata_api_check, skip_requesting_account_id, s3_use_path_style</td><td>remove all of them — real AWS validates each</td></tr>
-<tr><td>Transport</td><td>plain HTTP internally (LocalStack, Vault)</td><td>HTTPS end-to-end</td></tr>
+<tr><td>Transport</td><td>plain HTTP internally (MiniStack, Vault)</td><td>HTTPS end-to-end</td></tr>
 <tr><td>RBAC</td><td>broad cluster-scoped read-aws-family-config grant to a provider SA</td><td>scope tightly, audit, track the upstream issue; prefer namespaced grants</td></tr>
 <tr><td>Network</td><td>no NetworkPolicy</td><td>deny-by-default NetworkPolicy between namespaces</td></tr>
 <tr><td>Sizing / HA</td><td>no requests/limits, single replica, no PDB</td><td>sized resources, HA replicas, PodDisruptionBudgets, health checks</td></tr>
@@ -351,11 +365,11 @@ kubectl -n demo-app-2 logs deploy/demo-app-2</code></pre>
 <tr><td>Behavioural noise</td><td>15s write loop; ESO refresh cadence</td><td>back off to sane intervals</td></tr>
 </table>
 <p style="font-size:.9em;color:rgba(127,127,127,.9)">Marker for "PoC only": a
-hardcoded credential, a LocalStack-specific flag, a manual Endpoints, a broad
+hardcoded credential, a MiniStack-specific flag, a manual Endpoints, a broad
 cluster RBAC grant, or a single-replica / no-state-isolation assumption.</p>
 
 <p style="margin-top:2rem;color:rgba(127,127,127,.8);font-size:.85em">
-Generated from <code>README.md</code> · Crossplane v2 · LocalStack · Vault · kind/podman
+Generated from <code>README.md</code> · Crossplane v2 · MiniStack · Vault · kind/podman
 </p>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/hcl.min.js"></script>

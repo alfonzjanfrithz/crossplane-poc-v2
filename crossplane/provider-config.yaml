@@ -1,18 +1,18 @@
 apiVersion: aws.m.upbound.io/v1beta1
 kind: ClusterProviderConfig
 metadata:
-  name: localstack
+  name: ministack
 spec:
   credentials:
     source: Secret
     secretRef:
-      name: localstack-aws-creds
+      name: ministack-aws-creds
       namespace: crossplane-system
       key: creds
   endpoint:
     url:
       type: Static
-      static: http://localstack.localstack-system.svc.cluster.local:4566
+      static: http://ministack.ministack-system.svc.cluster.local:4566
     # source: Custom is REQUIRED for the static URL to be honored. With the
     # default (ServiceMetadata) the AWS SDK v2 resolves the endpoint from AWS
     # service metadata (i.e. real AWS), ignoring the static URL entirely.

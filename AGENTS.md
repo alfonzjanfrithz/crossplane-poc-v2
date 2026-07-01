@@ -5,7 +5,7 @@ Guide for AI agents working in this repo. Read this first.
 ## What this is
 
 A **Crossplane v2** proof of concept. A namespaced composite resource (`XBucket`)
-is composed into a real S3 bucket (in LocalStack) via the **v2 native per-service
+is composed into a real S3 bucket (in MiniStack) via the **v2 native per-service
 AWS provider**, plus a native Secret and a terraform `Workspace`. That `Workspace`
 publishes the dynamic bucket name to **Vault** *from inside the composition*
 (lifecycle-coupled: deleting the XR runs `terraform destroy` and removes the Vault
@@ -15,7 +15,7 @@ entry) so a **consumer app in a separate namespace** can read the shared bucket.
 `tf.m.upbound.io`), no claims, no native P&T, no connection details, no external
 secret stores, no ControllerConfig.
 
-Runs on **kind + podman (rootless) + LocalStack** (LocalStack runs outside the
+Runs on **kind + podman (rootless) + MiniStack** (MiniStack runs outside the
 cluster, on the podman `kind` bridge network at `10.89.1.10`).
 
 Full narrative + diagrams: `README.md` (markdown) and `index.html`
@@ -61,7 +61,7 @@ checks value-in-Vault before installing the consumer, etc.).
   → local `shared-bucket` Secret → lists producer's objects in the shared bucket.
 - Vault KV v2 at `secret/`; `vault.rss.svc.cluster.local:8200`; dev-mode root
   token `root`.
-- LocalStack reached via an in-cluster headless `Service` + manual `Endpoints`.
+- MiniStack reached via an in-cluster headless `Service` + manual `Endpoints`.
 
 ## CRITICAL traps (non-obvious, hard-won)
 
@@ -80,10 +80,10 @@ If something breaks, check these first.
    (`crossplane/provider-aws-s3-runtime.yaml`): pin the SA through
    `serviceAccountTemplate` so the RBAC binding survives provider revisions.
    Requires `deploymentTemplate.spec.selector` + matching template labels.
-5. **LocalStack endpoint** in `crossplane/provider-config.yaml`: BOTH
+5. **MiniStack endpoint** in `crossplane/provider-config.yaml`: BOTH
    `endpoint.source: Custom` AND `endpoint.services: [s3]` are required. Missing
    either → traffic silently goes to real AWS → `403 InvalidAccessKeyId`;
-   LocalStack logs show NO request. (Tell: 403 with real-AWS-style
+   MiniStack logs show NO request. (Tell: 403 with real-AWS-style
    `RequestID`/`HostID`.)
 6. **Credentials**: `credentials.source: Secret` (INI format). `source: None` =
    empty creds. There is **no** `Environment` source.
@@ -111,7 +111,15 @@ If something breaks, check these first.
     `/var/run → /run` symlink).
 17. **HCL**: `variable` blocks must be multi-line; single-line
     `variable "x" { type=string sensitive=true }` is illegal.
-18. **Docs**: mermaid captions must be alphanumeric-only (no `()` or symbols).
+ 18. **Docs**: mermaid captions must be alphanumeric-only (no `()` or symbols).
+ 19. **MiniStack + AWS SDK v2 checksums**: the AWS CLI/SDK v2 defaults to the
+     CRC64NVME checksum on `PutObject`, which MiniStack doesn't bundle (only
+     SHA256/SHA1/CRC32). Symptom: an app's `aws s3 cp` fails with `InvalidRequest:
+     Checksum algorithm not supported ... CRC64NVME` while the provider's
+     `CreateBucket` (no object checksum) is unaffected — so the bucket is Ready
+     but the app logs `write FAILED`. Fix: `AWS_REQUEST_CHECKSUM_CALCULATION=
+     when_required` (+ `AWS_RESPONSE_CHECKSUM_VALIDATION=when_required`) on any
+     pod calling S3. Already wired into both demo Deployments.
 
 ## File map
 
@@ -119,13 +127,13 @@ If something breaks, check these first.
 | --- | --- |
 | `crossplane/xrd.yaml` | v2 namespaced `XBucket` XRD |
 | `crossplane/composition.yaml` | function composition: Bucket + Secret + Workspace |
-| `crossplane/provider-config.yaml` | native AWS ClusterProviderConfig (LocalStack endpoint) |
+| `crossplane/provider-config.yaml` | native AWS ClusterProviderConfig (MiniStack endpoint) |
 | `crossplane/provider-config-terraform.yaml` | terraform ClusterProviderConfig (k8s backend) |
 | `crossplane/providers.yaml` | installs `provider-aws-s3` + `provider-terraform` |
 | `crossplane/provider-aws-s3-runtime.yaml` | DeploymentRuntimeConfig (stable SA) |
 | `crossplane/provider-aws-s3-rbac.yaml` | grants the stable SA the missing RBAC |
-| `crossplane/aws-creds-secret.yaml` | LocalStack creds (`test`/`test`) INI Secret |
-| `crossplane/localstack-service.yaml` | headless Service + Endpoints to LocalStack |
+| `crossplane/aws-creds-secret.yaml` | MiniStack creds (`test`/`test`) INI Secret |
+| `crossplane/ministack-service.yaml` | headless Service + Endpoints to MiniStack |
 | `crossplane/function-patch-and-transform.yaml` | composition function |
 | `charts/demo-app/` | producer: XBucket XR + ConfigMap + Deployment |
 | `charts/demo-app-2/` | consumer: `eso.yaml` ExternalSecret + Deployment |
@@ -148,7 +156,7 @@ If something breaks, check these first.
   `index.html` (highlight.js github-dark + mermaid CDNs; code blocks tagged
   `language-yaml`/`language-hcl`/`language-bash`/`nohighlight`; HCL loaded via an
   extra `languages/hcl.min.js`).
-- No real secrets in this repo. All creds are LocalStack fakes (`test`/`test`)
+- No real secrets in this repo. All creds are MiniStack fakes (`test`/`test`)
   or Vault dev-mode (`root`).
 
 ## Verify it works (proof points)
@@ -156,7 +164,7 @@ If something breaks, check these first.
 `up.sh` exits 0 and, live:
 
 1. Producer pod is `Running` and writing objects to its bucket.
-2. The bucket + objects exist in LocalStack.
+2. The bucket + objects exist in MiniStack.
 3. Vault has the value at `secret/crossplane/demo-app-bucket` (written by the
    composed `Workspace`).
 4. Consumer pod (`demo-app-2`) is `Running` and logs show it listing the
@@ -181,4 +189,4 @@ If something breaks, check these first.
   `kubectl apply --dry-run=server` against the running cluster.
 - Status: `kubectl get managed,composite,externalsecrets -A`.
 - Vault: `kubectl -n rss exec deploy/vault -- vault kv get secret/crossplane/demo-app-bucket`.
-- LocalStack: `curl http://10.89.1.10:4566/_localstack/health`.
+- MiniStack: `curl http://10.89.1.10:4566/_ministack/health`.

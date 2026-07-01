@@ -30,13 +30,21 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.name }}-bucket
                   key: bucketName
-            # LocalStack ignores credentials, but the AWS SDK requires *some*.
+            # MiniStack ignores credentials, but the AWS SDK requires *some*.
             - name: AWS_ACCESS_KEY_ID
               value: test
             - name: AWS_SECRET_ACCESS_KEY
               value: test
             - name: AWS_REGION
               value: us-east-1
+            # AWS CLI/SDK v2 defaults to the CRC64NVME checksum on PutObject;
+            # MiniStack doesn't bundle that native algorithm (only SHA256/SHA1/
+            # CRC32). Only send a checksum when the operation *requires* one
+            # (PutObject doesn't) -> requests stay checksum-free and succeed.
+            - name: AWS_REQUEST_CHECKSUM_CALCULATION
+              value: when_required
+            - name: AWS_RESPONSE_CHECKSUM_VALIDATION
+              value: when_required
           volumeMounts:
             - name: config
               mountPath: /etc/config
@@ -54,7 +62,7 @@ spec:
               while true; do
                 TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
                 echo "${TS} hello from ${BUCKET_NAME}" > /tmp/msg.txt
-                if aws --endpoint-url=http://localstack.localstack-system.svc.cluster.local:4566 \
+                if aws --endpoint-url=http://ministack.ministack-system.svc.cluster.local:4566 \
                         --region us-east-1 \
                         s3 cp /tmp/msg.txt "s3://${BUCKET_NAME}/msgs/msg-${TS}.txt" >/dev/null 2>&1; then
                   echo "[${TS}] wrote s3://${BUCKET_NAME}/msgs/msg-${TS}.txt"

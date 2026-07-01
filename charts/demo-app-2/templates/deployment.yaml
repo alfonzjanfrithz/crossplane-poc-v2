@@ -38,6 +38,12 @@ spec:
               value: test
             - name: AWS_REGION
               value: us-east-1
+            # AWS CLI/SDK v2 defaults to the CRC64NVME checksum; MiniStack only
+            # bundles SHA256/SHA1/CRC32. Only checksum when required (see demo-app).
+            - name: AWS_REQUEST_CHECKSUM_CALCULATION
+              value: when_required
+            - name: AWS_RESPONSE_CHECKSUM_VALIDATION
+              value: when_required
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -47,7 +53,7 @@ spec:
                 TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
                 echo "[${TS}] shared bucket = ${BUCKET_NAME}"
                 echo "[${TS}] objects written by demo-app visible in s3://${BUCKET_NAME}/msgs/:"
-                aws --endpoint-url=http://localstack.localstack-system.svc.cluster.local:4566 \
+                aws --endpoint-url=http://ministack.ministack-system.svc.cluster.local:4566 \
                     --region us-east-1 \
                     s3 ls "s3://${BUCKET_NAME}/msgs/" 2>&1 | tail -3 || echo "  (list failed)"
                 sleep {{ .Values.pollSeconds }}

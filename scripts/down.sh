@@ -7,8 +7,8 @@ export KIND_EXPERIMENTAL_PROVIDER=podman
 echo "==> deleting kind cluster"
 kind delete cluster --name crossplane-poc 2>/dev/null || true
 
-echo "==> stopping LocalStack"
-podman rm -f localstack >/dev/null 2>&1 || true
+echo "==> stopping MiniStack"
+podman rm -f ministack >/dev/null 2>&1 || true
 
 if [ "${1:-}" = "--purge" ]; then
   echo "==> removing kind node image"

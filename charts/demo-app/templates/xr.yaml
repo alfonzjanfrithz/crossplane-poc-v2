@@ -17,4 +17,4 @@ spec:
   # spec.crossplane, not directly under spec.
   crossplane:
     compositionRef:
-      name: xbuckets.localstack.s3
+      name: xbuckets.ministack.s3

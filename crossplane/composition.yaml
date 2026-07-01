@@ -1,9 +1,9 @@
 apiVersion: apiextensions.crossplane.io/v1
 kind: Composition
 metadata:
-  name: xbuckets.localstack.s3
+  name: xbuckets.ministack.s3
   labels:
-    provider: aws-localstack
+    provider: aws-ministack
 spec:
   mode: Pipeline
   compositeTypeRef:
@@ -33,7 +33,7 @@ spec:
                   region: us-east-1
                 providerConfigRef:
                   kind: ClusterProviderConfig
-                  name: localstack
+                  name: ministack
             patches:
               - type: CombineFromComposite
                 combine:

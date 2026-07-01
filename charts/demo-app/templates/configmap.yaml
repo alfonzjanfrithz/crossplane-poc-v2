@@ -13,7 +13,7 @@ data:
   config.json: |
     {
       "bucket": "${BUCKET_NAME}",
-      "endpoint": "http://localstack.localstack-system.svc.cluster.local:4566",
+      "endpoint": "http://ministack.ministack-system.svc.cluster.local:4566",
       "region": "us-east-1",
       "pollSeconds": {{ .Values.pollSeconds }}
     }
