@@ -67,12 +67,21 @@ helm repo update >/dev/null
 # it). Behind a TLS-intercepting proxy that fails with "x509: certificate signed by
 # unknown authority". Crossplane has no skip-TLS flag, so feed it the host's trusted
 # CA bundle (which includes the proxy's CA) via registryCaBundleConfig. The bundle is
-# extracted from the macOS trust stores at runtime into an ephemeral ConfigMap; it is
+# extracted from the host's trust store at runtime into an ephemeral ConfigMap; it is
 # never committed. On a machine without a proxy this is a harmless extra trust bundle.
 kubectl get namespace crossplane-system >/dev/null 2>&1 || kubectl create namespace crossplane-system >/dev/null
 CA_BUNDLE="$(mktemp)"
-security find-certificate -a -p /System/Library/Keychains/SystemRootCertificates.keychain >  "$CA_BUNDLE" 2>/dev/null || true
-security find-certificate -a -p /Library/Keychains/System.keychain                         >> "$CA_BUNDLE" 2>/dev/null || true
+if command -v security >/dev/null 2>&1; then
+  # macOS: export the SystemRoot + System keychains to PEM.
+  security find-certificate -a -p /System/Library/Keychains/SystemRootCertificates.keychain >  "$CA_BUNDLE" 2>/dev/null || true
+  security find-certificate -a -p /Library/Keychains/System.keychain                         >> "$CA_BUNDLE" 2>/dev/null || true
+else
+  # Linux: copy the system trust bundle (Debian/Ubuntu and Fedora/RHEL paths).
+  for f in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/cert.pem; do
+    [ -s "$f" ] && cp "$f" "$CA_BUNDLE" && break
+  done
+fi
+[ -s "$CA_BUNDLE" ] || { echo "ERROR: no CA bundle found on host; cannot start Crossplane." >&2; rm -f "$CA_BUNDLE"; exit 1; }
 # Use create (not apply): the bundle is too big for apply's last-applied-config
 # annotation (256KB cap); ConfigMap data allows ~1MB. Delete-first keeps it idempotent.
 kubectl -n crossplane-system delete configmap registry-ca --ignore-not-found >/dev/null
